@@ -1,0 +1,13 @@
+{
+  "name": "hg-skills",
+  "version": "1.0.0",
+  "description": "Personal productivity skills for Claude Code — plan, execute, discuss, babysit PRs, and more.",
+  "skills": [
+    "skills/babysit",
+    "skills/discuss",
+    "skills/execute",
+    "skills/notepad",
+    "skills/plan",
+    "skills/skill-builder"
+  ]
+}
