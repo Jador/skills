@@ -1,7 +1,7 @@
 ---
 name: hg:babysit
 description: Monitor a PR for review comments and build failures
-argument-hint: [<pr-number> | stop]
+argument-hint: [<pr-number> | stop] [--no-comments] [--no-builds]
 disable-model-invocation: true
 ---
 
@@ -18,11 +18,18 @@ Before doing anything, verify the environment:
 
 ## Argument Parsing
 
-Parse `$ARGUMENTS` to determine the mode of operation:
+Parse `$ARGUMENTS` to determine the mode of operation. Before mode detection, extract any flags from `$ARGUMENTS`:
+
+- `--no-comments` — disables the comment-check cron job
+- `--no-builds` — disables the build-check cron job
+
+Strip these flags from `$ARGUMENTS` before proceeding with mode detection below. The remaining text (after flag removal and trimming whitespace) is used for mode selection.
+
+If both `--no-comments` and `--no-builds` are specified, tell the user: "Both checks are disabled — nothing to monitor." Then stop.
 
 ### Mode 1: No arguments (auto-detect PR)
 
-If `$ARGUMENTS` is empty or blank:
+If the remaining `$ARGUMENTS` is empty or blank:
 
 1. Detect the current branch's PR number by running:
    ```
@@ -37,7 +44,7 @@ If `$ARGUMENTS` is empty or blank:
 
 ### Mode 2: Numeric argument (explicit PR number)
 
-If `$ARGUMENTS` is a number (matches `^[0-9]+$`):
+If the remaining `$ARGUMENTS` is a number (matches `^[0-9]+$`):
 
 1. Use that number as the PR number.
 2. Verify the PR exists by running:
@@ -49,7 +56,7 @@ If `$ARGUMENTS` is a number (matches `^[0-9]+$`):
 
 ### Mode 3: Stop
 
-If `$ARGUMENTS` is `stop` (case-insensitive):
+If the remaining `$ARGUMENTS` is `stop` (case-insensitive):
 
 1. **List all cron jobs:** Use `CronList` to retrieve all currently active cron jobs.
 
@@ -59,9 +66,9 @@ If `$ARGUMENTS` is `stop` (case-insensitive):
 
 4. **Delete each matching job:** Use `CronDelete` to remove each matching cron job by its ID.
 
-5. **Clean up state files:** For each unique PR number found in step 3, remove the corresponding state files from the `data/` directory (relative to this skill's directory):
-   - `data/<PR_NUMBER>-seen-comments.json`
-   - `data/<PR_NUMBER>-seen-builds.json`
+5. **Clean up state files:** For each unique PR number found in step 3, remove the corresponding state files from the `babysit/data/` directory (relative to this skill's location at `~/.claude/skills/babysit/`):
+   - `babysit/data/<PR_NUMBER>-seen-comments.json`
+   - `babysit/data/<PR_NUMBER>-seen-builds.json`
 
    Use `rm -f` so that missing files do not cause errors.
 
@@ -80,6 +87,8 @@ gh repo view --json nameWithOwner --jq .nameWithOwner
 Store the result (e.g., `owner/repo-name`) alongside the PR number and branch name. These three values — **repo** (`owner/name`), **PR number**, and **branch name** — are used by downstream cron job setup.
 
 ## Pipeline Detection
+
+**Skip this section entirely if `--no-builds` was specified.** Pipeline detection is only needed for the build-check cron job.
 
 After determining the repo, detect the Buildkite pipeline for this repository:
 
@@ -120,54 +129,57 @@ WARNING: Branch <BRANCH_NAME> has diverged from origin/main. There may be merge 
 
 Continue regardless — this is a warning only, not a blocker.
 
-### Step 2: Read and Interpolate the Comment-Check Prompt
+### Step 2: (Comment-Check Prompt)
 
-Use the `Read` tool to read the file `assets/comment-check-prompt.md` (relative to this skill's directory).
+No pre-interpolation needed — the comment-check cron wrapper (Step 5) reads and interpolates the asset file at execution time, then delegates to a sub-agent.
 
-In the file contents, replace all occurrences of:
-- `<REPO>` with the detected repo name (e.g., `owner/repo-name`)
-- `<PR_NUMBER>` with the PR number
-- `<BRANCH_NAME>` with the branch name
+### Step 3: (Build-Check Prompt)
 
-Store the interpolated result as `comment_check_prompt`.
-
-### Step 3: Read and Interpolate the Build-Check Prompt
-
-Use the `Read` tool to read the file `assets/build-check-prompt.md` (relative to this skill's directory).
-
-In the file contents, replace all occurrences of:
-- `<REPO>` with the detected repo name
-- `<PR_NUMBER>` with the PR number
-- `<BRANCH_NAME>` with the branch name
-- `<PIPELINE>` with the detected pipeline slug
-
-Store the interpolated result as `build_check_prompt`.
+No pre-interpolation needed — the build-check cron wrapper (Step 6) reads and interpolates the asset file at execution time, then delegates to a sub-agent.
 
 ### Step 4: Create Data Directory
 
 Run:
 
 ```
-mkdir -p <skill-directory>/data
+mkdir -p ~/.claude/skills/babysit/data
 ```
 
 This ensures the state directory exists for the cron agents to write to.
 
 ### Step 5: Create Comment-Check Cron Job
 
+**Skip this step if `--no-comments` was specified.**
+
 Use `CronCreate` with:
 - **schedule**: `*/5 * * * *`
-- **prompt**: the interpolated `comment_check_prompt` from Step 2
+- **prompt**: a thin delegation wrapper that reads the asset file, interpolates variables, and delegates to a sub-agent. The prompt should be (with `<REPO>`, `<PR_NUMBER>`, and `<BRANCH_NAME>` replaced by their actual detected values):
+
+```
+[babysit:<PR_NUMBER>] Read the file `~/.claude/skills/babysit/assets/comment-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, and `<BRANCH_NAME>` with `<BRANCH_NAME>`. Then pass the fully interpolated prompt to the Agent tool with description "comment-check PR #<PR_NUMBER>". Print the sub-agent's returned summary.
+```
+
+In the prompt text above, all template variables (`<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`) must be replaced with the actual values detected earlier — the cron prompt is stored with those values baked in. At cron execution time, the cron agent will read the asset file, perform the replacements, and delegate to a sub-agent via the Agent tool.
 
 ### Step 6: Create Build-Check Cron Job
 
+**Skip this step if `--no-builds` was specified.**
+
 Use `CronCreate` with:
 - **schedule**: `*/2 * * * *`
-- **prompt**: the interpolated `build_check_prompt` from Step 3
+- **prompt**: a thin delegation wrapper that reads the asset file, interpolates variables, and delegates to a sub-agent. The prompt should be (with `<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, and `<PIPELINE>` replaced by their actual detected values):
+
+```
+[babysit:<PR_NUMBER>] Read the file `~/.claude/skills/babysit/assets/build-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, `<BRANCH_NAME>` with `<BRANCH_NAME>`, and `<PIPELINE>` with `<PIPELINE>`. Then pass the fully interpolated prompt to the Agent tool with description "build-check PR #<PR_NUMBER>". Print the sub-agent's returned summary.
+```
+
+In the prompt text above, all template variables (`<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, `<PIPELINE>`) must be replaced with the actual values detected earlier — the cron prompt is stored with those values baked in. At cron execution time, the cron agent will read the asset file, perform the replacements, and delegate to a sub-agent via the Agent tool.
 
 ### Step 7: Print Confirmation
 
-Print the following confirmation message:
+Print a confirmation message listing only the checks that were enabled. Replace `<REPO>`, `<PR_NUMBER>`, and `<BRANCH_NAME>` with the actual values.
+
+If both checks are enabled (default):
 
 ```
 PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
@@ -175,4 +187,20 @@ PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
 - Build status: checking every 2 minutes
 ```
 
-Replace `<REPO>`, `<PR_NUMBER>`, and `<BRANCH_NAME>` with the actual values. Then stop.
+If only comments are enabled (`--no-builds`):
+
+```
+PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
+- Review comments: checking every 5 minutes
+- Build status: disabled
+```
+
+If only builds are enabled (`--no-comments`):
+
+```
+PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
+- Review comments: disabled
+- Build status: checking every 2 minutes
+```
+
+Then stop.
