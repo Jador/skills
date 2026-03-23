@@ -1,7 +1,7 @@
 ---
-name: hg:notepad
+name: notepad
 description: Scratch pad for ideas. Use when the user wants to jot down, list, view, or remove ideas. Stores ideas in ~/notes.md with context about the project and relevant files.
-argument-hint: [add|list|view|remove] [idea or id]
+argument-hint: "[add|list|view|remove] [idea or id]"
 disable-model-invocation: true
 ---
 

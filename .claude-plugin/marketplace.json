@@ -1,0 +1,13 @@
+{
+  "name": "skills",
+  "owner": {
+    "name": "Jador"
+  },
+  "plugins": [
+    {
+      "name": "jador",
+      "description": "Plan, execute, discuss, babysit PRs, and more.",
+      "source": "./"
+    }
+  ]
+}

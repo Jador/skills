@@ -12,7 +12,7 @@ Use `jq` for all JSON parsing and manipulation throughout this prompt. Use `jq` 
 
 ## Step 1: Load seen-builds state
 
-Read the state file at `data/<PR_NUMBER>-seen-builds.json` using `jq`. If it does not exist, create it with the content `{}`.
+Read the state file at `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json` using `jq`. If it does not exist, create it with the content `{}`.
 
 This file is a JSON object mapping build numbers (as string keys) to objects with the shape:
 
@@ -50,7 +50,7 @@ to get detailed status.
 ## Step 3: Decide what to do
 
 - **If the build is passing or still running:** Do nothing. Stop here.
-- **If the build number is already in the state file with status `"fixed"` or `"skipped"`:** Do nothing. Stop here. This build has already been processed. Check with: `jq -r '.["<build_number>"].status // empty' data/<PR_NUMBER>-seen-builds.json`
+- **If the build number is already in the state file with status `"fixed"` or `"skipped"`:** Do nothing. Stop here. This build has already been processed. Check with: `jq -r '.["<build_number>"].status // empty' ${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json`
 - **If the build number is in the state file with status `"failed"` and `attempts >= 3`:** Do nothing. Stop here. Print the following warning to the terminal:
 
   ```
@@ -137,7 +137,7 @@ Update the state file: set the build entry to `{ "status": "skipped", "attempts"
 
 ## Step 8: Save state
 
-Write the updated state object back to `data/<PR_NUMBER>-seen-builds.json`.
+Write the updated state object back to `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json`.
 
 ---
 

@@ -1,7 +1,7 @@
 ---
-name: hg:discuss
+name: discuss
 description: Flesh out an idea through structured discussion. Asks questions one at a time, researches unknowns, and produces a polished idea document in ~/ideas/.
-argument-hint: <idea or topic to discuss>
+argument-hint: "<idea or topic to discuss>"
 disable-model-invocation: true
 ---
 

@@ -1,7 +1,7 @@
 ---
-name: hg:babysit
+name: babysit
 description: Monitor a PR for review comments and build failures
-argument-hint: [<pr-number> | stop] [--no-comments] [--no-builds]
+argument-hint: "[<pr-number> | stop] [--no-comments] [--no-builds]"
 disable-model-invocation: true
 ---
 
@@ -66,9 +66,9 @@ If the remaining `$ARGUMENTS` is `stop` (case-insensitive):
 
 4. **Delete each matching job:** Use `CronDelete` to remove each matching cron job by its ID.
 
-5. **Clean up state files:** For each unique PR number found in step 3, remove the corresponding state files from the `babysit/data/` directory (relative to this skill's location at `~/.claude/skills/babysit/`):
-   - `babysit/data/<PR_NUMBER>-seen-comments.json`
-   - `babysit/data/<PR_NUMBER>-seen-builds.json`
+5. **Clean up state files:** For each unique PR number found in step 3, remove the corresponding state files from the plugin data directory at `${CLAUDE_PLUGIN_DATA}/babysit/`:
+   - `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json`
+   - `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json`
 
    Use `rm -f` so that missing files do not cause errors.
 
@@ -142,7 +142,7 @@ No pre-interpolation needed — the build-check cron wrapper (Step 6) reads and 
 Run:
 
 ```
-mkdir -p ~/.claude/skills/babysit/data
+mkdir -p ${CLAUDE_PLUGIN_DATA}/babysit
 ```
 
 This ensures the state directory exists for the cron agents to write to.
@@ -156,7 +156,7 @@ Use `CronCreate` with:
 - **prompt**: a thin delegation wrapper that reads the asset file, interpolates variables, and delegates to a sub-agent. The prompt should be (with `<REPO>`, `<PR_NUMBER>`, and `<BRANCH_NAME>` replaced by their actual detected values):
 
 ```
-[babysit:<PR_NUMBER>] Read the file `~/.claude/skills/babysit/assets/comment-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, and `<BRANCH_NAME>` with `<BRANCH_NAME>`. Then pass the fully interpolated prompt to the Agent tool with description "comment-check PR #<PR_NUMBER>". Print the sub-agent's returned summary.
+[babysit:<PR_NUMBER>] Read the file `${CLAUDE_SKILL_DIR}/assets/comment-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, and `<BRANCH_NAME>` with `<BRANCH_NAME>`. Then pass the fully interpolated prompt to the Agent tool with description "comment-check PR #<PR_NUMBER>". Print the sub-agent's returned summary.
 ```
 
 In the prompt text above, all template variables (`<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`) must be replaced with the actual values detected earlier — the cron prompt is stored with those values baked in. At cron execution time, the cron agent will read the asset file, perform the replacements, and delegate to a sub-agent via the Agent tool.
@@ -170,7 +170,7 @@ Use `CronCreate` with:
 - **prompt**: a thin delegation wrapper that reads the asset file, interpolates variables, and delegates to a sub-agent. The prompt should be (with `<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, and `<PIPELINE>` replaced by their actual detected values):
 
 ```
-[babysit:<PR_NUMBER>] Read the file `~/.claude/skills/babysit/assets/build-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, `<BRANCH_NAME>` with `<BRANCH_NAME>`, and `<PIPELINE>` with `<PIPELINE>`. Then pass the fully interpolated prompt to the Agent tool with description "build-check PR #<PR_NUMBER>". Print the sub-agent's returned summary.
+[babysit:<PR_NUMBER>] Read the file `${CLAUDE_SKILL_DIR}/assets/build-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, `<BRANCH_NAME>` with `<BRANCH_NAME>`, and `<PIPELINE>` with `<PIPELINE>`. Then pass the fully interpolated prompt to the Agent tool with description "build-check PR #<PR_NUMBER>". Print the sub-agent's returned summary.
 ```
 
 In the prompt text above, all template variables (`<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, `<PIPELINE>`) must be replaced with the actual values detected earlier — the cron prompt is stored with those values baked in. At cron execution time, the cron agent will read the asset file, perform the replacements, and delegate to a sub-agent via the Agent tool.

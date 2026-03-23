@@ -11,7 +11,7 @@ Use `jq` for all JSON parsing and manipulation throughout this prompt. Pipe `gh 
 Read the seen-comments state file to determine which comments have already been processed:
 
 ```
-cat data/<PR_NUMBER>-seen-comments.json 2>/dev/null || echo "[]"
+cat ${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json 2>/dev/null || echo "[]"
 ```
 
 Parse the result with `jq` as a JSON array of comment IDs (integers) that have already been handled. Store this list in memory as `seen_ids`.
@@ -142,10 +142,10 @@ Be respectful and specific. Never be dismissive. Always explain your reasoning w
 After processing all comments (whether acted on, skipped as non-actionable, or skipped as self-authored), write the updated `seen_ids` list back to the state file. The list should include ALL comment IDs encountered in this run, plus any previously seen IDs:
 
 ```
-mkdir -p data
+mkdir -p ${CLAUDE_PLUGIN_DATA}/babysit
 ```
 
-Write the updated JSON array of all seen comment IDs to `data/<PR_NUMBER>-seen-comments.json`. The file should contain a JSON array of integer IDs, e.g.:
+Write the updated JSON array of all seen comment IDs to `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json`. The file should contain a JSON array of integer IDs, e.g.:
 
 ```json
 [1234567, 1234568, 1234590]

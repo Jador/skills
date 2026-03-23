@@ -1,7 +1,7 @@
 ---
-name: hg:skill-builder
+name: skill-builder
 description: Scaffold new Claude Code skills through structured conversation. Discusses the user's intent, fetches official docs, infers conventions from existing skills, and generates complete skill files — SKILL.md, assets, data directories — ready to use.
-argument-hint: [description of the skill to build]
+argument-hint: "[description of the skill to build]"
 disable-model-invocation: true
 ---
 
@@ -29,7 +29,7 @@ If `$ARGUMENTS` is empty or vague, ask the user to describe what the skill shoul
 
 Determine whether this is a **personal skill** or a **project skill**:
 
-- **Personal skill**: Lives at `~/.claude/skills/<name>/SKILL.md`. Gets the `hg:` name prefix. Available across all projects.
+- **Personal skill**: Added to the `jador` plugin at `skills/<name>/SKILL.md` in the plugin repo. Gets the `jador:` namespace prefix. Available across all projects after a plugin update.
 - **Project skill**: Lives at `<repo>/.claude/skills/<name>/SKILL.md`. No name prefix. Scoped to a specific repository.
 
 Use AskUserQuestion to confirm the scope with the user. If the user has already indicated a preference (e.g., "make a personal skill for..."), confirm it rather than asking from scratch.
@@ -49,18 +49,18 @@ Work through the following topics conversationally. Ask questions only when you 
 
 Apply the appropriate conventions based on the scope determined in Step 3.
 
-**Personal skills** follow established patterns inferred from existing skills at `~/.claude/skills/`:
-- Name uses `hg:` prefix (e.g., `hg:my-skill`).
+**Personal skills** follow established patterns inferred from existing skills in the `hg-skills` plugin repo:
+- Plugin provides the `jador:` namespace automatically — skill names should not include a prefix.
 - Title is `# <Name> Skill` as an H1 heading.
 - Includes a **General Rules** section with the AskUserQuestion mandate.
 - `disable-model-invocation: true` by default.
 - Process section uses numbered steps with `### N. Step Title` headings.
 - `assets/` directory for templates or reference files, if needed.
-- `data/` directory for runtime output or state, if needed.
+- For runtime state/data, use `${CLAUDE_PLUGIN_DATA}/<skill-name>/` for durable storage that survives plugin updates.
 
-Read one or two existing personal skills (e.g., `~/.claude/skills/discuss/SKILL.md`, `~/.claude/skills/plan/SKILL.md`) to match tone, structure, and formatting conventions. Adapt — don't copy blindly.
+Read one or two existing personal skills (e.g., `${CLAUDE_SKILL_DIR}/../discuss/SKILL.md`, `${CLAUDE_SKILL_DIR}/../plan/SKILL.md`) to match tone, structure, and formatting conventions. Adapt — don't copy blindly.
 
-**Project skills** follow official best practices from the docs fetched in Step 1. No `hg:` prefix. Structure and conventions should match what the official documentation recommends.
+**Project skills** follow official best practices from the docs fetched in Step 1. No namespace prefix needed. Structure and conventions should match what the official documentation recommends.
 
 All conventions are defaults that the user can override. If the user wants to deviate from a convention, accommodate their preference.
 
@@ -88,7 +88,7 @@ Iterate until the user approves. Each iteration should present the updated draft
 Once the user approves:
 
 1. Create the skill directory:
-   - Personal: `~/.claude/skills/<name>/`
+   - Personal: `${CLAUDE_SKILL_DIR}/../<name>/` (in the plugin's skills directory)
    - Project: `<repo>/.claude/skills/<name>/`
 2. Write the `SKILL.md` file.
 3. Create `assets/` and `data/` directories if the skill uses them. Write any asset files.

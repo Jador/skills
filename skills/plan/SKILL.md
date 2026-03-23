@@ -1,7 +1,7 @@
 ---
-name: hg:plan
+name: plan
 description: Break down an idea into a detailed execution plan with small, self-contained tasks. Reads idea documents from ~/ideas/ and writes plans to CLAUDE_PLUGIN_DATA/plans/. Use when the user wants to plan, break down, or create tasks for an idea. Also lists existing plans when called with no arguments or "list".
-argument-hint: [<idea-slug> | list]
+argument-hint: "[<idea-slug> | list]"
 disable-model-invocation: true
 ---
 

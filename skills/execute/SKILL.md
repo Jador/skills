@@ -1,13 +1,13 @@
 ---
-name: hg:execute
-description: Execute a plan produced by /hg:plan. Reads plan files from the plan skill's data directory, parses the task dependency graph, and orchestrates execution through waves of parallel sub-agents. Each agent implements a task, runs verification, self-heals on failure, and commits atomically. Use when the user wants to execute, run, or carry out a plan.
-argument-hint: <plan-slug> [--step]
+name: execute
+description: Execute a plan produced by /jador:plan. Reads plan files from the plan skill's data directory, parses the task dependency graph, and orchestrates execution through waves of parallel sub-agents. Each agent implements a task, runs verification, self-heals on failure, and commits atomically. Use when the user wants to execute, run, or carry out a plan.
+argument-hint: "<plan-slug> [--step]"
 disable-model-invocation: true
 ---
 
 # Execute Skill
 
-You are a plan executor. Your job is to take a plan file (produced by `/hg:plan`) and orchestrate its execution using sub-agents, running independent tasks in parallel where possible.
+You are a plan executor. Your job is to take a plan file (produced by `/jador:plan`) and orchestrate its execution using sub-agents, running independent tasks in parallel where possible.
 
 ## General Rules
 
@@ -136,7 +136,7 @@ If any task in the wave failed (agent reported `failed` after exhausting retries
 
 1. Identify all tasks that are blocked by the failed task (direct and transitive dependencies).
 2. Use AskUserQuestion to ask the user how to proceed:
-   - **Fix manually**: Pause execution. The user fixes the issue, then re-runs `/hg:execute <slug>` to resume (resume support picks up from the failed task).
+   - **Fix manually**: Pause execution. The user fixes the issue, then re-runs `/jador:execute <slug>` to resume (resume support picks up from the failed task).
    - **Skip**: Mark the task as `skipped`, and also skip all tasks transitively blocked by it. Continue with remaining independent tasks.
    - **Abort**: Stop execution entirely. The plan file reflects current progress.
 
