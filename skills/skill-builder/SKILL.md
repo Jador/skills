@@ -27,12 +27,35 @@ If `$ARGUMENTS` is empty or vague, ask the user to describe what the skill shoul
 
 ### 3. Determine Skill Scope
 
-Determine whether this is a **personal skill** or a **project skill**:
+Determine the skill's scope:
 
-- **Personal skill**: Added to the `jador` plugin at `skills/<name>/SKILL.md` in the plugin repo. Gets the `jador:` namespace prefix. Available across all projects after a plugin update.
+- **Personal skill**: Lives at `~/.claude/skills/<name>/SKILL.md`. No namespace prefix. Available across all projects for the current user.
 - **Project skill**: Lives at `<repo>/.claude/skills/<name>/SKILL.md`. No name prefix. Scoped to a specific repository.
+- **Repo skill**: Lives in a standalone skills or plugin repository (e.g., `~/projects/skills`, `~/projects/claude-code-marketplace`). Intended for distribution or shared use. The repo's own plugin configuration determines the namespace prefix.
 
-Use AskUserQuestion to confirm the scope with the user. If the user has already indicated a preference (e.g., "make a personal skill for..."), confirm it rather than asking from scratch.
+Use AskUserQuestion to confirm the scope with the user, presenting all three options. If the user has already indicated a preference (e.g., "make a personal skill for..."), confirm it rather than asking from scratch.
+
+### 3b. Select Target Repository
+
+> Only when **repo scope** is selected.
+
+1. Read `${CLAUDE_PLUGIN_DATA}/skill-builder/repo-history.json` — a JSON array of previously used repo paths. If the file doesn't exist, treat the list as empty.
+2. Present the known paths (if any) plus an **"Enter a new path"** option via AskUserQuestion.
+3. When the user enters a new path, validate that the directory exists using Bash (`test -d`). If valid, append it to `repo-history.json` (create the file and parent directory if needed). If invalid, ask again.
+4. Store the selected repo path for use in subsequent steps.
+
+### 3c. Detect Repository Structure
+
+> Only when **repo scope** is selected.
+
+1. Use Glob to find all `SKILL.md` files in the target repo (pattern: `**/SKILL.md`).
+2. Infer the directory convention from their paths:
+   - Flat layout: `skills/<name>/SKILL.md`
+   - Nested plugin layout: `plugins/<name>/skills/<name>/SKILL.md`
+   - Other patterns as discovered
+3. If no existing skills are found, ask the user for the desired structure using AskUserQuestion, defaulting to `skills/<name>/SKILL.md`.
+4. Read 1-2 existing `SKILL.md` files to extract conventions: frontmatter fields, heading styles, section structure, and tone.
+5. Store the detected pattern and conventions for use in Steps 5 and 8.
 
 ### 4. Infer and Discuss Details
 
@@ -49,18 +72,22 @@ Work through the following topics conversationally. Ask questions only when you 
 
 Apply the appropriate conventions based on the scope determined in Step 3.
 
-**Personal skills** follow established patterns inferred from existing skills in the `hg-skills` plugin repo:
-- Plugin provides the `jador:` namespace automatically — skill names should not include a prefix.
+**Personal skills** follow official best practices from the docs fetched in Step 1:
+- No namespace prefix — skill names are used directly.
 - Title is `# <Name> Skill` as an H1 heading.
 - Includes a **General Rules** section with the AskUserQuestion mandate.
 - `disable-model-invocation: true` by default.
 - Process section uses numbered steps with `### N. Step Title` headings.
 - `assets/` directory for templates or reference files, if needed.
-- For runtime state/data, use `${CLAUDE_PLUGIN_DATA}/<skill-name>/` for durable storage that survives plugin updates.
 
-Read one or two existing personal skills (e.g., `${CLAUDE_SKILL_DIR}/../discuss/SKILL.md`, `${CLAUDE_SKILL_DIR}/../plan/SKILL.md`) to match tone, structure, and formatting conventions. Adapt — don't copy blindly.
+If the user has existing personal skills in `~/.claude/skills/`, read one or two to match tone, structure, and formatting conventions. Adapt — don't copy blindly.
 
 **Project skills** follow official best practices from the docs fetched in Step 1. No namespace prefix needed. Structure and conventions should match what the official documentation recommends.
+
+**Repo skills** follow the conventions auto-detected in Step 3c:
+- Apply the frontmatter fields, heading format, section structure, and tone inferred from existing skills in the target repo.
+- Namespace prefix depends on the repo's plugin configuration — read `.claude-plugin/plugin.json` if present to determine it.
+- If the target repo has no existing skills (fallback path from Step 3c), use the official best practices from Step 1 as a baseline.
 
 All conventions are defaults that the user can override. If the user wants to deviate from a convention, accommodate their preference.
 
@@ -72,6 +99,12 @@ Generate the complete SKILL.md and any supporting files (asset templates, data d
 - **No stubbed-out steps.** Each process step must have substantive instructions.
 - **Frontmatter must be valid YAML** with `name`, `description`, `argument-hint`, and `disable-model-invocation` fields.
 - **The skill must be self-contained.** Someone reading only the SKILL.md should understand exactly what the skill does and how it works.
+
+**Repo skills — documentation updates:** In addition to the SKILL.md and supporting files:
+1. Scan the target repo for documentation that references existing skills — READMEs, tables of contents, `marketplace.json` manifests, `CONTRIBUTING.md` skill lists, etc.
+2. Read those files to understand how new skills are documented (e.g., table rows, JSON entries, bullet lists).
+3. Generate the necessary documentation updates following the existing format.
+4. Include these documentation updates in the draft alongside the SKILL.md so the user can review everything together.
 
 ### 7. Review Loop
 
@@ -88,11 +121,13 @@ Iterate until the user approves. Each iteration should present the updated draft
 Once the user approves:
 
 1. Create the skill directory:
-   - Personal: `${CLAUDE_SKILL_DIR}/../<name>/` (in the plugin's skills directory)
+   - Personal: `~/.claude/skills/<name>/`
    - Project: `<repo>/.claude/skills/<name>/`
+   - Repo: `<target-repo>/<detected-pattern>/<name>/` (following the pattern detected in Step 3c)
 2. Write the `SKILL.md` file.
 3. Create `assets/` and `data/` directories if the skill uses them. Write any asset files.
-4. Confirm the full file paths to the user.
+4. **Repo skills only:** Apply the documentation updates generated in Step 6 — edit README tables, update manifests, add entries to skill lists, etc.
+5. Confirm all written and modified file paths to the user.
 
 ## Output Structure
 
@@ -107,3 +142,5 @@ The skill produces a directory with the following structure:
 ```
 
 The `assets/` and `data/` directories are only created when the skill being built requires them.
+
+For **repo-scoped skills**, additional files outside the skill directory may be modified — READMEs, manifests, tables of contents, or other documentation files that reference existing skills in the target repository.
