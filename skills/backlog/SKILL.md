@@ -21,13 +21,13 @@ Use Glob to find all files matching `~/ideas/*.md`. For each idea file:
 1. Extract the slug from the filename: strip the `YYYY-MM-DD-` date prefix and `.md` suffix (e.g., `2026-03-24-backlog.md` becomes `backlog`).
 2. Extract the date from the filename prefix (`YYYY-MM-DD`) and format it as `Mon DD` (e.g., `Mar 24`).
 3. Read the file and extract the title from the first H1 heading (`# ...`).
-4. Check whether `CLAUDE_PLUGIN_DATA/plans/<slug>.md` exists. If no matching plan exists, the idea is **unplanned**.
+4. Check whether `${CLAUDE_PLUGIN_DATA}/plans/<slug>.md` exists. If no matching plan exists, the idea is **unplanned**.
 
 Collect all unplanned ideas into a list.
 
 ### 2. Scan Plans
 
-Use Glob to find all files matching `CLAUDE_PLUGIN_DATA/plans/*.md`. For each plan file:
+Use Glob to find all files matching `${CLAUDE_PLUGIN_DATA}/plans/*.md`. For each plan file:
 
 1. Read the file and parse the YAML frontmatter.
 2. If the `status` field is `pending`, the plan is **unexecuted**.

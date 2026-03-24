@@ -21,7 +21,7 @@ Read `$ARGUMENTS` and parse it:
 - Extract the plan slug (everything before `--step` if present).
 - Detect the `--step` flag (enables pause-between-waves mode).
 
-Find the matching plan file in `CLAUDE_PLUGIN_DATA/plans/<slug>.md`. If the slug is empty or no file matches, list available plan files in that directory and use AskUserQuestion to ask the user to pick one.
+Find the matching plan file in `${CLAUDE_PLUGIN_DATA}/plans/<slug>.md`. If the slug is empty or no file matches, list available plan files in that directory and use AskUserQuestion to ask the user to pick one.
 
 Read the full plan file. Also read the idea file referenced in the plan's frontmatter `idea:` field for additional context.
 

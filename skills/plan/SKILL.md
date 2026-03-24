@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Break down an idea into a detailed execution plan with small, self-contained tasks. Reads idea documents from ~/ideas/ and writes plans to CLAUDE_PLUGIN_DATA/plans/. Use when the user wants to plan, break down, or create tasks for an idea. Also lists existing plans when called with no arguments or "list".
+description: Break down an idea into a detailed execution plan with small, self-contained tasks. Reads idea documents from ~/ideas/ and writes plans to the plugin data directory. Use when the user wants to plan, break down, or create tasks for an idea. Also lists existing plans when called with no arguments or "list".
 argument-hint: "[<idea-slug> | list]"
 disable-model-invocation: true
 ---
@@ -15,7 +15,7 @@ You are an execution planner. Your job is to take an idea document and break it 
 
 If `$ARGUMENTS` is empty or equals `list`, list all existing plans:
 
-1. Glob for `*.md` files in `CLAUDE_PLUGIN_DATA/plans/`.
+1. Glob for `*.md` files in `${CLAUDE_PLUGIN_DATA}/plans/`.
 2. For each plan file, read the frontmatter to extract the `status` and the `# Plan:` title.
 3. Display a table with columns: **Slug**, **Title**, **Status**.
 4. Stop here — do not continue to the planning steps below.
@@ -61,7 +61,7 @@ Iterate conversationally until the user approves.
 
 Once approved:
 
-1. Write the file to `CLAUDE_PLUGIN_DATA/plans/<slug>.md` using the slug from the idea filename.
+1. Write the file to `${CLAUDE_PLUGIN_DATA}/plans/<slug>.md` using the slug from the idea filename.
 2. Confirm the file path to the user.
 
 ## General Rules
