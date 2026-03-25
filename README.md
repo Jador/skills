@@ -10,6 +10,7 @@ Personal productivity skills for Claude Code.
 | **Plan** | `/jador:plan` | Break down an idea into a detailed execution plan with parallel task groups |
 | **Execute** | `/jador:execute` | Run a plan using parallel sub-agents with worktree isolation and auto-retry |
 | **Babysit** | `/jador:babysit` | Monitor a PR for review comments and build failures, auto-fixing issues |
+| **MQ** | `/jador:mq` | Monitor merge queue and auto-retry failed Buildkite jobs (checks every 2 min) |
 | **Notepad** | `/jador:notepad` | Quick scratch pad for capturing, listing, and managing ideas |
 | **Skill Builder** | `/jador:skill-builder` | Scaffold new Claude Code skills through guided conversation |
 
@@ -30,6 +31,7 @@ claude plugin install jador@skills
 
 ## Requirements
 
-- **gh CLI** — required by babysit skill ([install](https://cli.github.com/))
-- **bk CLI** — required by babysit skill for Buildkite integration
-- **jq** — used by babysit cron agents for JSON parsing
+- **gh CLI** — required by babysit and mq skills ([install](https://cli.github.com/))
+- **bk CLI** — required by babysit and mq skills for Buildkite integration
+- **jq** — used by babysit and mq cron agents for JSON parsing
+- **terminal-notifier** — required by mq skill for macOS notifications (`brew install terminal-notifier`)

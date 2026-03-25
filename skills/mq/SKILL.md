@@ -101,7 +101,7 @@ This ensures the state directory exists for the cron agent to write to.
 ### Step 2: Create Queue-Check Cron Job
 
 Use `CronCreate` with:
-- **schedule**: `*/5 * * * *`
+- **schedule**: `*/2 * * * *`
 - **prompt**: a thin delegation wrapper that reads the asset file, interpolates variables, and delegates to a sub-agent. The prompt should be (with `<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, and `<PIPELINE>` replaced by their actual detected values):
 
 ```
@@ -117,7 +117,7 @@ Print a confirmation message. Replace `<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, 
 ```
 Merge queue monitor started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
 - Pipeline: <PIPELINE>
-- Queue check: every 5 minutes
+- Queue check: every 2 minutes
 ```
 
 Then stop.
