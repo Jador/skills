@@ -175,30 +175,34 @@ Use `CronCreate` with:
 
 In the prompt text above, all template variables (`<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, `<PIPELINE>`) must be replaced with the actual values detected earlier — the cron prompt is stored with those values baked in. At cron execution time, the cron agent will read the asset file, perform the replacements, and delegate to a sub-agent via the Agent tool.
 
-### Step 6.5: Run Immediate Comment Check
+### Steps 7 & 8: Run Immediate Checks (Parallel)
+
+Steps 7 and 8 **must be launched as parallel Agent tool calls** — dispatch both simultaneously and wait for both to complete before proceeding to Step 9.
+
+### Step 7: Run Immediate Comment Check
 
 **Skip this step if `--no-comments` was specified.**
 
-Before printing the confirmation message, run an immediate comment check so the user gets instant feedback on any existing review comments without waiting for the first cron tick.
+Run an immediate comment check so the user gets instant feedback on any existing review comments without waiting for the first cron tick. This step runs **in parallel** with Step 8.
 
 1. Read the file `${CLAUDE_SKILL_DIR}/assets/comment-check-prompt.md`.
 2. In its contents, replace `<REPO>` with the detected repo value, `<PR_NUMBER>` with the detected PR number, and `<BRANCH_NAME>` with the detected branch name.
 3. Pass the fully interpolated prompt to the **Agent** tool with description `"comment-check PR #<PR_NUMBER>"` (with `<PR_NUMBER>` replaced by the actual PR number).
 4. Print the sub-agent's returned summary.
 
-> **Note:** This step should run in parallel with the immediate build-check step (Step 6.6). Both immediate checks can be dispatched as simultaneous Agent tool calls.
-
-### Step 6.6: Run Immediate Build Check
+### Step 8: Run Immediate Build Check
 
 **Skip this step if `--no-builds` was specified.**
 
-Immediately after creating the build-check cron job, spawn a sub-agent to run the build check right away so the user gets instant feedback on any existing build failures. This step should run **in parallel** with the immediate comment-check sub-agent (Step 6.5).
+Run an immediate build check so the user gets instant feedback on any existing build failures. This step runs **in parallel** with Step 7.
 
 1. Read the file `${CLAUDE_SKILL_DIR}/assets/build-check-prompt.md`.
 2. In its contents, replace `<REPO>` with the detected repo, `<PR_NUMBER>` with the detected PR number, `<BRANCH_NAME>` with the detected branch name, and `<PIPELINE>` with the detected pipeline slug.
 3. Pass the fully interpolated prompt to the Agent tool with description `"build-check PR #<PR_NUMBER>"` (where `<PR_NUMBER>` is the actual PR number).
 
-### Step 7: Print Confirmation
+### Step 9: Print Confirmation
+
+**Only run this step after both Steps 7 and 8 have completed (or been skipped).**
 
 Print a confirmation message listing only the checks that were enabled. Replace `<REPO>`, `<PR_NUMBER>`, and `<BRANCH_NAME>` with the actual values.
 
