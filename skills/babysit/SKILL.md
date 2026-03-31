@@ -1,7 +1,7 @@
 ---
 name: babysit
 description: Monitor a PR for review comments and build failures
-argument-hint: "[<pr-number> | stop] [--no-comments] [--no-builds]"
+argument-hint: "[<pr-number> | stop | clean] [--no-comments] [--no-builds]"
 disable-model-invocation: true
 ---
 
@@ -66,13 +66,28 @@ If the remaining `$ARGUMENTS` is `stop` (case-insensitive):
 
 4. **Delete each matching job:** Use `CronDelete` to remove each matching cron job by its ID.
 
-5. **Clean up state files:** For each unique PR number found in step 3, remove the corresponding state files from the plugin data directory at `${CLAUDE_PLUGIN_DATA}/babysit/`:
-   - `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json`
-   - `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json`
+5. **Print confirmation:** Print a summary message listing how many cron jobs were stopped and which PR number(s) they were for. For example: "Stopped 4 babysitter jobs for PR(s): #123, #456."
 
-   Use `rm -f` so that missing files do not cause errors.
+Then stop — do not continue to Repository Detection or Next Steps.
 
-6. **Print confirmation:** Print a summary message listing how many cron jobs were stopped and which PR number(s) they were for. For example: "Stopped 4 babysitter jobs for PR(s): #123, #456."
+### Mode 4: Clean
+
+If the remaining `$ARGUMENTS` is `clean` (case-insensitive):
+
+1. **Scan for state files:** List all files in `${CLAUDE_PLUGIN_DATA}/babysit/` matching the patterns `*-seen-comments.json` and `*-seen-builds.json`. If no matching files exist, print: "No babysit state files found." Then stop.
+
+2. **Extract PR numbers:** From the matching filenames, extract the PR number portion. Filenames follow the pattern `<PR_NUMBER>-seen-comments.json` and `<PR_NUMBER>-seen-builds.json`. Collect the unique set of PR numbers.
+
+3. **Check PR status:** For each unique PR number, run:
+   ```
+   gh pr view <PR_NUMBER> --json state --jq .state
+   ```
+
+4. **Clean or preserve:** For each PR number:
+   - If the state is `MERGED` or `CLOSED`: delete both `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json` and `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json` using `rm -f`. Report: "Cleaned state for PR #<PR_NUMBER> (<state>)."
+   - If the state is `OPEN`: skip deletion. Report: "Preserved state for PR #<PR_NUMBER> (still open)."
+
+5. **Print summary:** Print a summary listing all PRs that were cleaned and all that were preserved.
 
 Then stop — do not continue to Repository Detection or Next Steps.
 
