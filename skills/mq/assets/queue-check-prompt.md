@@ -90,7 +90,7 @@ Use `jq` to extract the entry matching PR #<PR_NUMBER>:
   Print the following and stop:
 
   ```
-  [mq] PR #<PR_NUMBER> is not in the merge queue
+  PR #<PR_NUMBER> is not in the merge queue
   ```
 
 - **If the entry exists and the status check rollup state is `SUCCESS` or `PENDING`:**
@@ -98,7 +98,7 @@ Use `jq` to extract the entry matching PR #<PR_NUMBER>:
   Print the following and stop:
 
   ```
-  [mq] PR #<PR_NUMBER> merge queue status: OK
+  PR #<PR_NUMBER> merge queue status: OK
   ```
 
 - **If the status check rollup state is `FAILURE` or `ERROR`, or any check run has conclusion `FAILURE`:**
@@ -160,7 +160,7 @@ jq --arg bn "<build_number>" \
 Print:
 
 ```
-[mq] PR #<PR_NUMBER> merge queue build #<build_number>: retried <N> failed job(s) (attempt <attempts>/3)
+PR #<PR_NUMBER> merge queue build #<build_number>: retried <N> failed job(s) (attempt <attempts>/3)
 ```
 
 Stop here. The next polling cycle will re-check.
@@ -180,16 +180,10 @@ When a build has reached 3 retry attempts and is still failing:
       && mv /tmp/mq-state-tmp.json ${CLAUDE_PLUGIN_DATA}/mq/<PR_NUMBER>-state.json
    ```
 
-2. Print the following warning:
+2. Notify the user that retries are exhausted:
 
    ```
-   [mq] WARNING: PR #<PR_NUMBER> merge queue build #<build_number> has failed 3 times
-   ```
-
-3. Send a macOS notification:
-
-   ```
-   terminal-notifier -title "mq" -message "PR #<PR_NUMBER> merge queue retries exhausted" -sound default
+   WARNING: PR #<PR_NUMBER> merge queue build #<build_number> has failed 3 times. Manual intervention required.
    ```
 
 ---
@@ -199,6 +193,5 @@ When a build has reached 3 retry attempts and is still failing:
 - **Retry limit:** You may retry failed jobs a maximum of 3 times per build. Each retry cycle (regardless of how many jobs are retried) increments the `attempts` counter. After 3 attempts, stop retrying and notify the user.
 - **Never force-push.** Do not run `git push --force` or `git push --force-with-lease` under any circumstances.
 - **Always update the state file** before exiting, so the next polling cycle knows what has been processed.
-- **Print `[mq]` prefix** on all output lines for consistent log identification.
-- **If any command fails unexpectedly** (e.g., `bk` CLI errors, `gh` API errors, network issues), print a diagnostic message prefixed with `[mq]` and stop. Do not retry infrastructure failures.
+- **If any command fails unexpectedly** (e.g., `bk` CLI errors, `gh` API errors, network issues), print a diagnostic message and stop. Do not retry infrastructure failures.
 - **Do not remove the PR from the merge queue.** Only notify — leave removal decisions to the user.

@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Break down an idea into a detailed execution plan with small, self-contained tasks. Reads idea documents from ~/ideas/ and writes plans to the plugin data directory. Use when the user wants to plan, break down, or create tasks for an idea. Also lists existing plans when called with no arguments or "list".
+description: Break down an idea into a detailed execution plan with small, self-contained tasks. Reads idea documents from ~/ideas/ and writes plans to ~/plans/. Use when the user wants to plan, break down, or create tasks for an idea — even if they just say "plan <slug>" without elaborating. Also lists existing plans when called with "list".
 argument-hint: "[<idea-slug> | list]"
 disable-model-invocation: true
 ---
@@ -11,18 +11,30 @@ You are an execution planner. Your job is to take an idea document and break it 
 
 ## Process
 
-### 0. List Plans (when no arguments or `list`)
+### 0. Route Based on Arguments
 
-If `$ARGUMENTS` is empty or equals `list`, list all existing plans:
+Check `$ARGUMENTS` and take exactly one of these three paths:
 
-1. Glob for `*.md` files in `${CLAUDE_PLUGIN_DATA}/plans/`.
+**Path A — Slug provided** (anything that is not empty and not `list`):
+Jump directly to Step 1 with the slug from `$ARGUMENTS`.
+
+**Path B — `list`** (argument is exactly `list`):
+1. Glob for `*.md` files in `~/plans/`.
 2. For each plan file, read the frontmatter to extract the `status` and the `# Plan:` title.
 3. Display a table with columns: **Slug**, **Title**, **Status**.
 4. Stop here — do not continue to the planning steps below.
 
+**Path C — No arguments** (`$ARGUMENTS` is empty):
+1. Glob for all `*.md` files in `~/ideas/`.
+2. For each idea, extract the slug from the filename (strip `YYYY-MM-DD-` prefix and `.md` suffix).
+3. Check whether `~/plans/<slug>.md` exists — if it does, skip this idea (already planned).
+4. Present the remaining unplanned ideas to the user using AskUserQuestion and let them pick one.
+5. If no unplanned ideas remain, tell the user everything is planned and stop.
+6. Continue to Step 1 with the chosen slug.
+
 ### 1. Load the Idea
 
-Read `$ARGUMENTS` as the idea slug. Find the matching file in `~/ideas/` — match against filenames that end with `-<slug>.md` (the date prefix varies). If multiple files match, show them and ask the user to pick one. If no file matches, list available idea files and ask the user to choose.
+Read the idea slug (from Path A or Path C above). Find the matching file in `~/ideas/` — match against filenames that end with `-<slug>.md` (the date prefix varies). If multiple files match, show them and ask the user to pick one. If no file matches, list available idea files and ask the user to choose.
 
 Read the full idea document.
 
@@ -43,7 +55,7 @@ Break the idea down into tasks following these rules:
 - **Ordered**: Tasks are numbered sequentially. Earlier tasks are foundational; later tasks build on them.
 - **Dependencies explicit**: Each task declares which earlier tasks (if any) must be completed first via `blocked_by`.
 - **Parallelism noted**: Tasks that can run simultaneously share a `parallel_group` label. Independent tasks with no blockers that could run at the same time should be grouped.
-- **Testable**: Where applicable, each task includes a verification step — a command to run, a test to pass, or a condition to check. Always include steps to run tests, lint, and typecheck (for typed languages).
+- **Verified**: Every task that modifies code must include a verification step — a command to run, a test to pass, or a condition to check. Include steps to run tests, lint, and typecheck (for typed languages). There is no "where applicable" — if the task touches code, it gets a verification step.
 
 Use the template at [assets/plan-template.md](assets/plan-template.md) for the output format.
 
@@ -61,7 +73,7 @@ Iterate conversationally until the user approves.
 
 Once approved:
 
-1. Write the file to `${CLAUDE_PLUGIN_DATA}/plans/<slug>.md` using the slug from the idea filename.
+1. Write the file to `~/plans/<slug>.md` using the slug from the idea filename.
 2. Confirm the file path to the user.
 
 ## General Rules

@@ -27,7 +27,9 @@ If `$ARGUMENTS` is empty or vague, ask the user to describe what the skill shoul
 
 ### 3. Determine Skill Scope
 
-Determine the skill's scope:
+Before asking about scope, check if the current working directory (or its parent) contains `.claude-plugin/plugin.json`. If detected, this is a plugin repo — default to **repo scope** with the current directory as the target. Confirm with the user: "Looks like you're in a plugin repo — want to add a skill here?" If they confirm, skip Step 3b (target repo selection) since the target is already known.
+
+If no plugin repo is detected, determine the scope:
 
 - **Personal skill**: Lives at `~/.claude/skills/<name>/SKILL.md`. No namespace prefix. Available across all projects for the current user.
 - **Project skill**: Lives at `<repo>/.claude/skills/<name>/SKILL.md`. No name prefix. Scoped to a specific repository.
@@ -144,3 +146,7 @@ The skill produces a directory with the following structure:
 The `assets/` and `data/` directories are only created when the skill being built requires them.
 
 For **repo-scoped skills**, additional files outside the skill directory may be modified — READMEs, manifests, tables of contents, or other documentation files that reference existing skills in the target repository.
+
+## After Scaffolding
+
+Once all files are written, suggest testing and iterating on the new skill with skill-creator (e.g., "Want me to set up some test cases and run evals on the new skill?"). Skill-builder owns scaffolding (scope detection, convention inference, documentation updates); skill-creator owns validation (test cases, benchmarks, description optimization). They complement each other — scaffolding first, then validation.

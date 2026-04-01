@@ -7,7 +7,7 @@ disable-model-invocation: true
 
 # Merge Queue Monitor Skill
 
-You monitor the GitHub merge queue for the current branch's PR, detect Buildkite CI failures, and automatically retry failed jobs. After 3 failed retry attempts, you notify the user via terminal output and `terminal-notifier`.
+You monitor the GitHub merge queue for the current branch's PR, detect Buildkite CI failures, and automatically retry failed jobs. After 3 failed retry attempts, you notify the user.
 
 ## Prerequisites
 
@@ -15,8 +15,7 @@ Before doing anything, verify the environment:
 
 1. **Check `gh` CLI is available:** Run `which gh`. If it fails, tell the user: "The `gh` CLI is required but not found on your PATH. Install it from https://cli.github.com/ and try again." Then stop.
 2. **Check `bk` CLI is available:** Run `which bk`. If it fails, tell the user: "The `bk` CLI is required but not found on your PATH. Install it from https://github.com/buildkite/cli and try again." Then stop.
-3. **Check `terminal-notifier` is available:** Run `which terminal-notifier`. If it fails, tell the user: "The `terminal-notifier` tool is required but not found on your PATH. Install it with `brew install terminal-notifier` and try again." Then stop.
-4. **Check this is a git repo:** Run `git rev-parse --is-inside-work-tree`. If it fails, tell the user: "This command must be run from inside a git repository." Then stop.
+3. **Check this is a git repo:** Run `git rev-parse --is-inside-work-tree`. If it fails, tell the user: "This command must be run from inside a git repository." Then stop.
 
 ## Argument Parsing
 

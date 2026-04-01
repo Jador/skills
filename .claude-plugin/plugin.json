@@ -1,5 +1,6 @@
 {
   "name": "jador",
-  "version": "1.7.0",
-  "description": "Personal productivity skills for Claude Code — plan, execute, discuss, babysit PRs, and more."
+  "version": "1.8.0",
+  "description": "Personal productivity skills for Claude Code — plan, execute, discuss, babysit PRs, and more.",
+  "hooks": "./hooks/hooks.json"
 }

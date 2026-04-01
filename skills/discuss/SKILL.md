@@ -53,8 +53,13 @@ Once the user approves the draft:
 
 1. Create the `~/ideas/` directory if it doesn't exist.
 2. Generate a short slug from the idea title (lowercase, hyphens, no special characters).
-3. Write the file to `~/ideas/YYYY-MM-DD-<slug>.md` using today's date.
-4. Confirm the file path to the user.
+3. **Check for collisions before writing:**
+   - Glob `~/ideas/` for files ending in `-<slug>.md` (any date prefix).
+   - If a file with the **same slug and today's date** already exists, append a numeric suffix: `-2`, `-3`, etc. (e.g., `2026-04-01-auth-flow-2.md`).
+   - If a file with the **same slug but a different date** exists, tell the user about it and ask whether to combine into the existing file or create a new one. Wait for approval before acting — default to creating a new file.
+4. Never modify or overwrite an existing file in `~/ideas/` without explicit user approval.
+5. Write the file to `~/ideas/YYYY-MM-DD-<slug>.md` using today's date (with suffix if needed).
+6. Confirm the file path to the user.
 
 ## Output Document Format
 

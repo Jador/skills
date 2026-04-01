@@ -100,14 +100,15 @@ A failure is considered **unrelated** if NONE of the above conditions are met. C
 2. Analyze the failure logs to understand the root cause.
 3. Make the minimal fix required. Do not refactor unrelated code.
 4. Verify the fix makes sense by reading the surrounding code context.
-5. Stage and commit the changes with a descriptive message, e.g.:
+5. Run the project's verification commands for the affected files — tests, lint, typecheck, or whatever the project uses. Figure out what to run based on the project's tooling (e.g., package.json scripts, Makefile targets, CI config). If verification fails, iterate on the fix until it passes. Do not commit code that doesn't pass verification.
+6. Stage and commit the changes with a descriptive message, e.g.:
 
    ```
    git add <files>
    git commit -m "fix: resolve <brief description of the failure>"
    ```
 
-6. Push the changes:
+7. Push the changes:
 
    ```
    git push
@@ -121,7 +122,7 @@ A failure is considered **unrelated** if NONE of the above conditions are met. C
 
    Update the state file to record the attempt (increment `attempts`, keep status as `"failed"`), then stop.
 
-7. If the push succeeds, update the state file: set the build entry to `{ "status": "fixed", "attempts": <current_attempts + 1> }`.
+8. If the push succeeds, update the state file: set the build entry to `{ "status": "fixed", "attempts": <current_attempts + 1> }`.
 
 ## Step 7b: If the failure is UNRELATED — skip it
 

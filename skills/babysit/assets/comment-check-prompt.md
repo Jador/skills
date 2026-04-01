@@ -104,12 +104,13 @@ For each actionable comment, evaluate whether the requested change is warranted:
 
 1. Make the requested code change in the file(s) indicated.
 2. Verify the change is correct (read the modified file, check for syntax errors).
-3. Stage and commit with a descriptive message referencing the review feedback:
+3. Run the project's verification commands for the affected files — tests, lint, typecheck, or whatever the project uses. Figure out what to run based on the project's tooling (e.g., package.json scripts, Makefile targets, CI config). If verification fails, fix the issue before proceeding. Do not commit code that doesn't pass verification.
+4. Stage and commit with a descriptive message referencing the review feedback:
    ```
    git add <files>
    git commit -m "Address review feedback: <brief description of change>"
    ```
-4. Push the changes:
+5. Push the changes:
    ```
    git push origin <BRANCH_NAME>
    ```
@@ -118,7 +119,7 @@ For each actionable comment, evaluate whether the requested change is warranted:
    echo "ALERT: Push failed for PR #<PR_NUMBER>. Branch <BRANCH_NAME> may have diverged. Manual intervention required."
    ```
    Then stop processing further comments.
-5. Reply to the comment confirming the fix:
+6. Reply to the comment confirming the fix:
    ```
    gh api repos/<REPO>/pulls/<PR_NUMBER>/comments/<COMMENT_ID>/replies --method POST -f body="> [!NOTE]
    > ### [ :robot: :speech_balloon: ]

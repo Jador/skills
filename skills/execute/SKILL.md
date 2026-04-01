@@ -1,6 +1,6 @@
 ---
 name: execute
-description: Execute a plan produced by /jador:plan. Reads plan files from the plan skill's data directory, parses the task dependency graph, and orchestrates execution through waves of parallel sub-agents. Each agent implements a task, runs verification, self-heals on failure, and commits atomically. Use when the user wants to execute, run, or carry out a plan.
+description: Execute a plan produced by /jador:plan. Reads plan files from ~/plans/, parses the task dependency graph, and orchestrates execution through waves of parallel sub-agents. Each agent implements a task, runs verification, self-heals on failure, and commits atomically. Use when the user wants to execute, run, or carry out a plan.
 argument-hint: "<plan-slug> [--step]"
 disable-model-invocation: true
 ---
@@ -12,6 +12,7 @@ You are a plan executor. Your job is to take a plan file (produced by `/jador:pl
 ## General Rules
 
 - **Always use the AskUserQuestion tool when presenting the user with a choice between discrete options.** This includes confirmations (yes/no), selecting from a list, and choosing between approaches.
+- **Never execute task work in the parent agent.** When a task needs to be retried (sub-agent failure, retasking, connectivity loss), always spawn a new sub-agent. Do not attempt the task inline. This preserves the parallelism and worktree isolation that the execute skill is designed around.
 
 ## Process
 
@@ -21,7 +22,7 @@ Read `$ARGUMENTS` and parse it:
 - Extract the plan slug (everything before `--step` if present).
 - Detect the `--step` flag (enables pause-between-waves mode).
 
-Find the matching plan file in `${CLAUDE_PLUGIN_DATA}/plans/<slug>.md`. If the slug is empty or no file matches, list available plan files in that directory and use AskUserQuestion to ask the user to pick one.
+Find the matching plan file in `~/plans/<slug>.md`. If the slug is empty or no file matches, list available plan files in that directory and use AskUserQuestion to ask the user to pick one.
 
 Read the full plan file. Also read the idea file referenced in the plan's frontmatter `idea:` field for additional context.
 
