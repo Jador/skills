@@ -1,18 +1,5 @@
 {
   "name": "jador",
-  "version": "1.8.1",
-  "description": "Personal productivity skills for Claude Code — plan, execute, discuss, babysit PRs, and more.",
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/gh-auth-switch.sh"
-          }
-        ]
-      }
-    ]
-  }
+  "version": "1.8.2",
+  "description": "Personal productivity skills for Claude Code — plan, execute, discuss, babysit PRs, and more."
 }
