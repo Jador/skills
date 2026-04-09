@@ -175,10 +175,171 @@ async function pollComments(
 }
 
 async function pollBuilds(
-  _server: Server,
-  _config: WatchConfig
+  srv: Server,
+  config: WatchConfig
 ): Promise<void> {
-  // Stub — will be implemented in Task 4
+  try {
+    if (!config.pipeline) return;
+
+    // 1. Load seen builds from state
+    const seenBuilds = readSeenBuilds(config.pr_number);
+
+    // 2. Fetch latest builds via bk CLI
+    const proc = Bun.spawn(
+      [
+        "bk",
+        "build",
+        "list",
+        "--branch",
+        config.branch,
+        "--pipeline",
+        config.pipeline,
+        "--limit",
+        "5",
+        "--json",
+      ],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+
+    if (exitCode !== 0) {
+      console.error(
+        `[babysit] pollBuilds: bk build list failed (exit ${exitCode}): ${stderr}`
+      );
+      return;
+    }
+
+    let builds: Array<{
+      number: number;
+      state: string;
+      pipeline?: { slug?: string };
+      [key: string]: unknown;
+    }>;
+    try {
+      builds = JSON.parse(stdout);
+    } catch (parseErr) {
+      console.error(
+        `[babysit] pollBuilds: failed to parse bk build list JSON: ${parseErr}`
+      );
+      return;
+    }
+
+    if (!Array.isArray(builds) || builds.length === 0) return;
+
+    // Filter to matching pipeline slug and take the most recent build
+    const pipelineBuilds = builds.filter(
+      (b) => b.pipeline?.slug === config.pipeline
+    );
+    const latestBuild = pipelineBuilds[0];
+    if (!latestBuild) return;
+
+    const buildNumber = String(latestBuild.number);
+    const buildState = latestBuild.state;
+
+    // 3. Determine if this build needs attention
+    // Skip if passing or running
+    if (buildState === "passed" || buildState === "running") return;
+
+    const seen = seenBuilds[buildNumber];
+
+    // Skip if already fixed or skipped in state
+    if (seen && (seen.status === "fixed" || seen.status === "skipped")) return;
+
+    // If failed and already seen with attempts >= 3, emit max_retries warning
+    if (seen && seen.status === "failed" && seen.attempts >= 3) {
+      await srv.notification({
+        method: "notifications/claude/channel",
+        params: {
+          content: JSON.stringify({
+            build_number: buildNumber,
+            state: buildState,
+            jobs: [],
+          }),
+          meta: {
+            type: "build_max_retries",
+            pr: config.pr_number,
+            repo: config.repo,
+            branch: config.branch,
+            pipeline: config.pipeline,
+            instructions: config.instructions || "",
+          },
+        },
+      });
+      return;
+    }
+
+    // If failed and new or under retry limit: fetch details and emit failure
+    if (buildState === "failed") {
+      // 4. Fetch detailed build info for failing jobs
+      const detailProc = Bun.spawn(
+        [
+          "bk",
+          "build",
+          "view",
+          "-p",
+          config.pipeline,
+          buildNumber,
+          "--json",
+        ],
+        { stdout: "pipe", stderr: "pipe" }
+      );
+
+      const detailStdout = await new Response(detailProc.stdout).text();
+      const detailStderr = await new Response(detailProc.stderr).text();
+      const detailExitCode = await detailProc.exited;
+
+      let failingJobs: Array<{ id: string; name: string }> = [];
+
+      if (detailExitCode !== 0) {
+        console.error(
+          `[babysit] pollBuilds: bk build view failed (exit ${detailExitCode}): ${detailStderr}`
+        );
+        // Continue with empty jobs — still emit the failure event
+      } else {
+        try {
+          const detail = JSON.parse(detailStdout);
+          const jobs: Array<{
+            id?: string;
+            name?: string;
+            state?: string;
+            [key: string]: unknown;
+          }> = detail.jobs || [];
+          failingJobs = jobs
+            .filter((j) => j.state === "failed")
+            .map((j) => ({ id: j.id || "", name: j.name || "" }));
+        } catch (parseErr) {
+          console.error(
+            `[babysit] pollBuilds: failed to parse bk build view JSON: ${parseErr}`
+          );
+        }
+      }
+
+      // 5. Emit channel notification for build failure
+      await srv.notification({
+        method: "notifications/claude/channel",
+        params: {
+          content: JSON.stringify({
+            build_number: buildNumber,
+            state: buildState,
+            jobs: failingJobs,
+          }),
+          meta: {
+            type: "build_failure",
+            pr: config.pr_number,
+            repo: config.repo,
+            branch: config.branch,
+            pipeline: config.pipeline,
+            instructions: config.instructions || "",
+          },
+        },
+      });
+    }
+  } catch (err) {
+    console.error(`[babysit] pollBuilds error: ${err}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
