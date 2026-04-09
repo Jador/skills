@@ -91,10 +91,86 @@ const watches = new Map<string, WatchConfig>();
 // ---------------------------------------------------------------------------
 
 async function pollComments(
-  _server: Server,
-  _config: WatchConfig
+  srv: Server,
+  config: WatchConfig
 ): Promise<void> {
-  // Stub — will be implemented in Task 3
+  try {
+    // 1. Load seen comment IDs from state
+    const seenIds = new Set(readSeenComments(config.pr_number));
+
+    // 2. Fetch review comments via gh api
+    const proc = Bun.spawn(
+      [
+        "gh",
+        "api",
+        `repos/${config.repo}/pulls/${config.pr_number}/comments`,
+        "--paginate",
+      ],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+
+    const stdout = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+
+    if (exitCode !== 0) {
+      console.error(
+        `[babysit] pollComments: gh api failed (exit ${exitCode}): ${stderr}`
+      );
+      return;
+    }
+
+    let allComments: Array<{ id: number; body: string; [key: string]: unknown }>;
+    try {
+      allComments = JSON.parse(stdout);
+    } catch (parseErr) {
+      console.error(
+        `[babysit] pollComments: failed to parse gh api JSON: ${parseErr}`
+      );
+      return;
+    }
+
+    if (!Array.isArray(allComments)) {
+      console.error("[babysit] pollComments: expected array from gh api");
+      return;
+    }
+
+    // 3. Filter to new comments not in the seen set
+    const newComments = allComments.filter((c) => !seenIds.has(c.id));
+
+    // 4. Skip self-authored comments (our bot replies use these callout patterns)
+    const selfPatterns = ["> [!NOTE]\n> ### [", "> [!IMPORTANT]"];
+    const externalComments = newComments.filter(
+      (c) =>
+        !selfPatterns.some(
+          (pattern) => typeof c.body === "string" && c.body.includes(pattern)
+        )
+    );
+
+    // 5. If there are new non-self comments, emit a channel notification
+    if (externalComments.length > 0) {
+      await srv.notification({
+        method: "notifications/claude/channel",
+        params: {
+          content: JSON.stringify(externalComments),
+          meta: {
+            type: "new_comments",
+            pr: config.pr_number,
+            repo: config.repo,
+            branch: config.branch,
+            instructions: config.instructions || "",
+          },
+        },
+      });
+    }
+
+    // 6. Update seen state with ALL comment IDs from this fetch
+    const allIds = allComments.map((c) => c.id);
+    const mergedIds = Array.from(new Set([...seenIds, ...allIds]));
+    writeSeenComments(config.pr_number, mergedIds);
+  } catch (err) {
+    console.error(`[babysit] pollComments error: ${err}`);
+  }
 }
 
 async function pollBuilds(
