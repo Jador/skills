@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "babysit": {
+      "command": "bun",
+      "args": ["./channel/babysit-channel.ts"]
+    }
+  }
+}
