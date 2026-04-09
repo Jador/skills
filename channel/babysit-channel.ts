@@ -4,7 +4,8 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, unlinkSync, existsSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -432,13 +433,101 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    // ----- clean (stub — Task 5) -----
+    // ----- clean -----
     case "clean": {
+      const dir = babysitDir();
+
+      // If the babysit directory doesn't exist, nothing to clean
+      if (!existsSync(dir)) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "No babysit state files found.",
+            },
+          ],
+        };
+      }
+
+      // List state files and extract unique PR numbers
+      const files = readdirSync(dir);
+      const stateFiles = files.filter(
+        (f) =>
+          f.endsWith("-seen-comments.json") || f.endsWith("-seen-builds.json")
+      );
+
+      if (stateFiles.length === 0) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "No babysit state files found.",
+            },
+          ],
+        };
+      }
+
+      const prNumbers = new Set<string>();
+      for (const f of stateFiles) {
+        // Filenames are like "123-seen-comments.json" or "123-seen-builds.json"
+        const match = f.match(/^(\d+)-seen-(?:comments|builds)\.json$/);
+        if (match) {
+          prNumbers.add(match[1]);
+        }
+      }
+
+      const cleaned: string[] = [];
+      const preserved: string[] = [];
+
+      for (const pr of prNumbers) {
+        let state: string;
+        try {
+          state = execSync(`gh pr view ${pr} --json state --jq .state`, {
+            encoding: "utf-8",
+            timeout: 15_000,
+          }).trim();
+        } catch {
+          // If gh fails (e.g. PR not found), treat as closed to allow cleanup
+          state = "CLOSED";
+        }
+
+        if (state === "MERGED" || state === "CLOSED") {
+          const commentsFile = join(dir, `${pr}-seen-comments.json`);
+          const buildsFile = join(dir, `${pr}-seen-builds.json`);
+          try {
+            unlinkSync(commentsFile);
+          } catch {
+            // file may not exist
+          }
+          try {
+            unlinkSync(buildsFile);
+          } catch {
+            // file may not exist
+          }
+          cleaned.push(`PR #${pr} (${state})`);
+        } else {
+          preserved.push(`PR #${pr} (still open)`);
+        }
+      }
+
+      const lines: string[] = [];
+      if (cleaned.length > 0) {
+        lines.push("Cleaned state for:");
+        for (const c of cleaned) lines.push(`  - ${c}`);
+      }
+      if (preserved.length > 0) {
+        lines.push("Preserved state for:");
+        for (const p of preserved) lines.push(`  - ${p}`);
+      }
+      if (cleaned.length === 0 && preserved.length === 0) {
+        lines.push("No PR state files matched expected patterns.");
+      }
+
       return {
         content: [
           {
             type: "text" as const,
-            text: "Clean is not yet implemented. It will be added in a future update.",
+            text: lines.join("\n"),
           },
         ],
       };
