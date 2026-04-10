@@ -164,7 +164,19 @@ Examples:
 
 ## Start Mode — Dispatch Instructions
 
-When a `<task-notification>` arrives from the monitor, parse each line of the notification body as a JSON object. Each JSON object has a `type` field. Handle each event according to its type:
+When a `<task-notification>` arrives from the monitor, parse each line of the notification body as a JSON object. Each JSON object has a `type` field.
+
+### Lock acquisition
+
+Before dispatching any sub-agents for a notification, acquire a lockfile to suppress polling during processing:
+
+```
+touch ${CLAUDE_PLUGIN_DATA}/babysit/poll.lock
+```
+
+This lock wraps the entire notification batch — acquire it once before handling any events from the notification.
+
+Handle each event according to its type:
 
 ### Event type: `"comment"`
 
@@ -198,6 +210,16 @@ Print a warning message: "Polling degraded: <message>. Will retry next cycle." (
 ### Multiple events in one notification
 
 If a single notification contains multiple JSON lines, dispatch a **separate sub-agent** for each `"comment"` or `"build_failure"` event. Error events are handled inline (print warning only). All sub-agent dispatches for a single notification may be launched in parallel.
+
+### Lock release
+
+After all sub-agents for a notification have returned (or if there were only error events and no agents were dispatched), release the lockfile:
+
+```
+rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll.lock
+```
+
+This ensures the lock is held for the entire notification batch and released only once all processing is complete.
 
 ## Confirmation Message
 
