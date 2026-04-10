@@ -67,6 +67,7 @@ fi
 
 # State directory
 STATE_DIR="${CLAUDE_PLUGIN_DATA}/babysit"
+LOCK_FILE="${STATE_DIR}/poll.lock"
 
 ###############################################################################
 # Comment polling
@@ -155,6 +156,20 @@ poll_builds() {
 ###############################################################################
 
 while true; do
+  # Lock check: skip this cycle if another agent holds the lock
+  if [[ -f "$LOCK_FILE" ]]; then
+    lock_mtime=$(stat -f %m "$LOCK_FILE" 2>/dev/null) || { sleep "$INTERVAL"; continue; }
+    now=$(date +%s)
+    age=$(( now - lock_mtime ))
+    if (( age > 600 )); then
+      rm -f "$LOCK_FILE"
+      echo '{"type":"error","source":"lock","message":"Removed stale poll lock (>10 min)"}'
+    else
+      sleep "$INTERVAL"
+      continue
+    fi
+  fi
+
   poll_comments
   poll_builds
   sleep "$INTERVAL"
