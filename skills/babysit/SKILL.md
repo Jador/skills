@@ -173,7 +173,7 @@ When a `<task-notification>` arrives from the monitor, parse each line of the no
 Before dispatching any sub-agents for a notification, acquire a lockfile to suppress polling during processing:
 
 ```
-touch ${CLAUDE_PLUGIN_DATA}/babysit/poll.lock
+touch ${CLAUDE_PLUGIN_DATA}/babysit/poll-$$.lock
 ```
 
 This lock wraps the entire notification batch — acquire it once before handling any events from the notification.
@@ -218,7 +218,7 @@ If a single notification contains multiple JSON lines, dispatch a **separate sub
 After all sub-agents for a notification have returned (or if there were only error events and no agents were dispatched), release the lockfile:
 
 ```
-rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll.lock
+rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll-$$.lock
 ```
 
 This ensures the lock is held for the entire notification batch and released only once all processing is complete.
