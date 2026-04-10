@@ -38,6 +38,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 ###############################################################################
+# Require BABYSIT_OWNER_PID
+###############################################################################
+
+if [[ -z "${BABYSIT_OWNER_PID:-}" ]]; then
+  echo '{"type":"error","source":"init","message":"BABYSIT_OWNER_PID is required but not set"}'
+  exit 1
+fi
+
+###############################################################################
 # Startup: auto-detect repo, PR, branch from cwd
 ###############################################################################
 
@@ -67,7 +76,7 @@ fi
 
 # State directory
 STATE_DIR="${CLAUDE_PLUGIN_DATA}/babysit"
-LOCK_FILE="${STATE_DIR}/poll.lock"
+LOCK_FILE="${STATE_DIR}/poll-${BABYSIT_OWNER_PID}.lock"
 
 ###############################################################################
 # Comment polling
