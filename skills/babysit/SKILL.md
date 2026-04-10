@@ -148,7 +148,7 @@ This ensures the state directory exists for the polling script to write to.
 
 Use the `Monitor` tool to start the background polling process with:
 
-- **command**: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "<PIPELINE>" --interval 30 --no-comments` (see construction rules below)
+- **command**: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "<PIPELINE>" --interval 120 --no-comments` (see construction rules below)
 - **description**: `babysit-monitor PR #<PR_NUMBER>` (with actual PR number)
 - **persistent**: `true`
 
@@ -156,13 +156,13 @@ Use the `Monitor` tool to start the background polling process with:
 - Always include the env prefix: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}"`
 - Always include: `bash "${CLAUDE_SKILL_DIR}/assets/poll.sh"`
 - If builds are enabled (no `--no-builds` flag): include the **PIPELINE** slug as the first positional argument. If builds are disabled (`--no-builds`): omit the pipeline argument entirely.
-- Always include: `--interval 30`
+- Always include: `--interval 120`
 - If `--no-comments` was specified: include `--no-comments`. Otherwise omit it.
 
 Examples:
-- Both enabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 30`
-- Comments disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 30 --no-comments`
-- Builds disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" --interval 30`
+- Both enabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 120`
+- Comments disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 120 --no-comments`
+- Builds disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" --interval 120`
 
 ## Start Mode — Dispatch Instructions
 
@@ -229,7 +229,7 @@ After the Monitor is launched, print the following confirmation message (replaci
 
 ```
 PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
-- Monitoring: every 30 seconds
+- Monitoring: every 2 minutes
 - Review comments: enabled/disabled
 - Build status: enabled/disabled (pipeline: <PIPELINE>)
 ```

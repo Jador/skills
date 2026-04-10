@@ -13,7 +13,7 @@ set -euo pipefail
 
 PIPELINE=""
 NO_COMMENTS=false
-INTERVAL=30
+INTERVAL=120
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
