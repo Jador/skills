@@ -57,7 +57,12 @@ If the remaining text is `clean` (case-insensitive):
    - If the state is `MERGED` or `CLOSED`: delete both `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json` and `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json` using `rm -f`. Report: "Cleaned state for PR #<PR_NUMBER> (<state>)."
    - If the state is `OPEN`: skip deletion. Report: "Preserved state for PR #<PR_NUMBER> (still open)."
 
-5. **Remove poll lockfile:** Remove the poll lockfile if it exists: `rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll.lock`.
+5. **Clean poll lockfiles:** Glob `${CLAUDE_PLUGIN_DATA}/babysit/poll-*.lock`. For each file:
+   - Extract the PID from the filename (the number between `poll-` and `.lock`).
+   - Check if the PID is alive: `kill -0 <PID> 2>/dev/null`.
+   - If the PID is dead (command fails): remove the lock file with `rm -f` and report: "Removed orphaned lock for PID <PID>."
+   - If the PID is alive (command succeeds): skip deletion and report: "Preserved active lock for PID <PID>."
+   - If no `poll-*.lock` files exist, report: "No poll lockfiles found."
 6. **Print summary:** Print a summary listing all PRs that were cleaned and all that were preserved.
 
 Then stop — do not continue to Start mode.
