@@ -1,13 +1,13 @@
 ---
 name: babysit
 description: Monitor a PR for review comments and build failures
-argument-hint: "[<pr-number> | stop | clean] [--no-comments] [--no-builds]"
+argument-hint: "[stop | clean] [--no-comments] [--no-builds] [\"instructions\"]"
 disable-model-invocation: true
 ---
 
 # Babysit Skill
 
-You monitor an open PR for review comments and build failures, automatically addressing feedback and fixing broken builds.
+You monitor an open PR for review comments and build failures, automatically addressing feedback and fixing broken builds. Uses the Monitor tool to run a background polling script that emits JSON events.
 
 ## Prerequisites
 
@@ -15,64 +15,33 @@ Before doing anything, verify the environment:
 
 1. **Check `gh` CLI is available:** Run `which gh`. If it fails, tell the user: "The `gh` CLI is required but not found on your PATH. Install it from https://cli.github.com/ and try again." Then stop.
 2. **Check this is a git repo:** Run `git rev-parse --is-inside-work-tree`. If it fails, tell the user: "This command must be run from inside a git repository." Then stop.
+3. **Check `jq` is available:** Run `which jq`. If it fails, tell the user: "The `jq` CLI is required but not found on your PATH. Install it via your package manager and try again." Then stop.
 
 ## Argument Parsing
 
 Parse `$ARGUMENTS` to determine the mode of operation. Before mode detection, extract any flags from `$ARGUMENTS`:
 
-- `--no-comments` — disables the comment-check cron job
-- `--no-builds` — disables the build-check cron job
+- `--no-comments` — disables comment monitoring
+- `--no-builds` — disables build monitoring
 
 Strip these flags from `$ARGUMENTS` before proceeding with mode detection below. The remaining text (after flag removal and trimming whitespace) is used for mode selection.
 
 If both `--no-comments` and `--no-builds` are specified, tell the user: "Both checks are disabled — nothing to monitor." Then stop.
 
-### Mode 1: No arguments (auto-detect PR)
+### Mode: Stop
 
-If the remaining `$ARGUMENTS` is empty or blank:
+If the remaining text is `stop` (case-insensitive):
 
-1. Detect the current branch's PR number by running:
-   ```
-   gh pr view --json number,headRefName --jq .number
-   ```
-2. If the command fails (no PR exists for the current branch), tell the user: "No open PR found for the current branch. Push your branch and open a PR first, or pass a PR number explicitly." Then stop.
-3. Store the PR number from the output.
-4. Capture the branch name by running:
-   ```
-   gh pr view --json headRefName --jq .headRefName
-   ```
+1. **List running tasks:** Use `TaskList` to retrieve all currently running tasks.
+2. **Filter for babysit monitors:** Examine each task's description for matches beginning with `babysit-monitor`. If no matching tasks are found, print: "No babysit monitors are currently running." Then stop.
+3. **Stop each match:** Use `TaskStop` on each matching task by its ID.
+4. **Print confirmation:** Print: "Stopped N babysit monitor(s)." (where N is the count of stopped tasks).
 
-### Mode 2: Numeric argument (explicit PR number)
+Then stop — do not continue to Start mode.
 
-If the remaining `$ARGUMENTS` is a number (matches `^[0-9]+$`):
+### Mode: Clean
 
-1. Use that number as the PR number.
-2. Verify the PR exists by running:
-   ```
-   gh pr view $ARGUMENTS --json number,headRefName --jq .headRefName
-   ```
-3. If the command fails, tell the user: "PR #$ARGUMENTS not found in this repository." Then stop.
-4. Store the PR number and the branch name from the output.
-
-### Mode 3: Stop
-
-If the remaining `$ARGUMENTS` is `stop` (case-insensitive):
-
-1. **List all cron jobs:** Use `CronList` to retrieve all currently active cron jobs.
-
-2. **Filter for babysitter jobs:** Examine each job's prompt for the tag `[babysit:`. Any job whose prompt contains this tag is a babysitter job. If no matching jobs are found, print: "No babysitter jobs are currently running." Then stop.
-
-3. **Extract PR numbers:** For each matching job, extract the PR number from the tag. The tag format is `[babysit:<PR_NUMBER>]` — parse the number between the colon and closing bracket. Collect the unique set of PR numbers across all matching jobs.
-
-4. **Delete each matching job:** Use `CronDelete` to remove each matching cron job by its ID.
-
-5. **Print confirmation:** Print a summary message listing how many cron jobs were stopped and which PR number(s) they were for. For example: "Stopped 4 babysitter jobs for PR(s): #123, #456."
-
-Then stop — do not continue to Repository Detection or Next Steps.
-
-### Mode 4: Clean
-
-If the remaining `$ARGUMENTS` is `clean` (case-insensitive):
+If the remaining text is `clean` (case-insensitive):
 
 1. **Scan for state files:** List all files in `${CLAUDE_PLUGIN_DATA}/babysit/` matching the patterns `*-seen-comments.json` and `*-seen-builds.json`. If no matching files exist, print: "No babysit state files found." Then stop.
 
@@ -89,45 +58,64 @@ If the remaining `$ARGUMENTS` is `clean` (case-insensitive):
 
 5. **Print summary:** Print a summary listing all PRs that were cleaned and all that were preserved.
 
-Then stop — do not continue to Repository Detection or Next Steps.
+Then stop — do not continue to Start mode.
 
-## Repository Detection
+### Mode: Start (default)
 
-After determining the PR number and branch name, detect the repository owner and name dynamically:
+If the remaining text is neither `stop` nor `clean` (case-insensitive), enter Start mode. Any remaining text after flag removal is the **freeform instructions** string. Store it for later use (it will be passed to sub-agents as `<FREEFORM_INSTRUCTIONS>`). If the remaining text is empty or blank, the freeform instructions value is `"None"`.
+
+## Start Mode — Detection
+
+### PR Detection
+
+Auto-detect the current branch's PR. Run:
+
+```
+gh pr view --json number,headRefName
+```
+
+If the command fails (no PR exists for the current branch), tell the user: "No open PR found for the current branch." Then stop.
+
+Parse the `number` and `headRefName` fields from the JSON output. Store these as **PR_NUMBER** and **BRANCH_NAME**.
+
+### Repository Detection
+
+Detect the repository owner and name:
 
 ```
 gh repo view --json nameWithOwner --jq .nameWithOwner
 ```
 
-Store the result (e.g., `owner/repo-name`) alongside the PR number and branch name. These three values — **repo** (`owner/name`), **PR number**, and **branch name** — are used by downstream cron job setup.
+Store the result (e.g., `owner/repo-name`) as **REPO**.
 
-## Pipeline Detection
+### Pipeline Detection
 
-**Skip this section entirely if `--no-builds` was specified.** Pipeline detection is only needed for the build-check cron job.
+**Skip this section entirely if `--no-builds` was specified.**
 
-After determining the repo, detect the Buildkite pipeline for this repository:
+**Check `bk` CLI is available:** Run `which bk`. If it fails, tell the user: "The `bk` CLI is required for build monitoring but not found on your PATH. Install it or use `--no-builds` to skip build monitoring." Then stop.
 
-1. Run:
+1. **Check for saved pipeline:** Read `${CLAUDE_PLUGIN_DATA}/babysit/pipelines.json` if it exists. Parse it as a JSON object mapping `owner/repo` to pipeline slug. If an entry exists for the current **REPO**, use that slug as **PIPELINE**. Skip to Branch Divergence Check.
+
+2. **Detect pipeline:** If no saved pipeline was found, run:
    ```
    bk pipeline list --json | jq -r '.[].slug'
    ```
-2. If exactly one pipeline is returned, use it.
-3. If multiple pipelines are returned, filter out secondary pipelines — those whose slug contains `publish`, `deploy`, `release`, or `rosetta`. If exactly one remains after filtering, use it.
-4. If zero or multiple pipelines remain after filtering, print the list and ask the user to choose:
-   ```
-   Multiple Buildkite pipelines found for this repo:
-   - <slug-1>
-   - <slug-2>
-   Which pipeline should I monitor?
-   ```
-   Then stop and wait for the user's response.
-5. Store the selected pipeline slug as the **pipeline** value. This — along with **repo**, **PR number**, and **branch name** — is used by downstream cron job setup.
+   Filter out secondary pipelines — those whose slug contains `publish`, `deploy`, `release`, or `rosetta`.
 
-## Start Monitoring
+3. **Select pipeline:**
+   - If exactly one pipeline remains after filtering, use it as **PIPELINE**.
+   - If zero or multiple pipelines remain after filtering, print the list and ask the user to choose:
+     ```
+     Multiple Buildkite pipelines found for this repo:
+     - <slug-1>
+     - <slug-2>
+     Which pipeline should I monitor?
+     ```
+     Then stop and wait for the user's response.
 
-Once argument parsing, repo detection, and pipeline detection are complete, set up the two independent cron-based polling loops.
+4. **Save pipeline:** Save the selected pipeline to `${CLAUDE_PLUGIN_DATA}/babysit/pipelines.json`. The file is a JSON object mapping `owner/repo` to slug. If the file already exists, merge the new entry into the existing object. If it does not exist, create it with the single entry.
 
-### Step 1: Check for Branch Divergence
+### Branch Divergence Check
 
 Run the following commands:
 
@@ -144,15 +132,7 @@ WARNING: Branch <BRANCH_NAME> has diverged from origin/main. There may be merge 
 
 Continue regardless — this is a warning only, not a blocker.
 
-### Step 2: (Comment-Check Prompt)
-
-No pre-interpolation needed — the comment-check cron wrapper (Step 5) reads and interpolates the asset file at execution time, then delegates to a sub-agent.
-
-### Step 3: (Build-Check Prompt)
-
-No pre-interpolation needed — the build-check cron wrapper (Step 6) reads and interpolates the asset file at execution time, then delegates to a sub-agent.
-
-### Step 4: Create Data Directory
+### Create Data Directory
 
 Run:
 
@@ -160,89 +140,77 @@ Run:
 mkdir -p ${CLAUDE_PLUGIN_DATA}/babysit
 ```
 
-This ensures the state directory exists for the cron agents to write to.
+This ensures the state directory exists for the polling script to write to.
 
-### Step 5: Create Comment-Check Cron Job
+## Start Mode — Launch Monitor
 
-**Skip this step if `--no-comments` was specified.**
+Use the `Monitor` tool to start the background polling process with:
 
-Use `CronCreate` with:
-- **schedule**: `*/5 * * * *`
-- **prompt**: a thin delegation wrapper that reads the asset file, interpolates variables, and delegates to a sub-agent. The prompt should be (with `<REPO>`, `<PR_NUMBER>`, and `<BRANCH_NAME>` replaced by their actual detected values):
+- **command**: `bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "<PIPELINE>" --interval 30 --no-comments` (see construction rules below)
+- **description**: `babysit-monitor PR #<PR_NUMBER>` (with actual PR number)
+- **persistent**: `true`
 
-```
-[babysit:<PR_NUMBER>] Read the file `${CLAUDE_SKILL_DIR}/assets/comment-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, and `<BRANCH_NAME>` with `<BRANCH_NAME>`. Then pass the fully interpolated prompt to the Agent tool with description "comment-check PR #<PR_NUMBER>". Print the sub-agent's returned summary.
-```
+**Command construction rules:**
+- Always include: `bash "${CLAUDE_SKILL_DIR}/assets/poll.sh"`
+- If builds are enabled (no `--no-builds` flag): include the **PIPELINE** slug as the first positional argument. If builds are disabled (`--no-builds`): omit the pipeline argument entirely.
+- Always include: `--interval 30`
+- If `--no-comments` was specified: include `--no-comments`. Otherwise omit it.
 
-In the prompt text above, all template variables (`<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`) must be replaced with the actual values detected earlier — the cron prompt is stored with those values baked in. At cron execution time, the cron agent will read the asset file, perform the replacements, and delegate to a sub-agent via the Agent tool.
+Examples:
+- Both enabled: `bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 30`
+- Comments disabled: `bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 30 --no-comments`
+- Builds disabled: `bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" --interval 30`
 
-### Step 6: Create Build-Check Cron Job
+## Start Mode — Dispatch Instructions
 
-**Skip this step if `--no-builds` was specified.**
+When a `<task-notification>` arrives from the monitor, parse each line of the notification body as a JSON object. Each JSON object has a `type` field. Handle each event according to its type:
 
-Use `CronCreate` with:
-- **schedule**: `*/2 * * * *`
-- **prompt**: a thin delegation wrapper that reads the asset file, interpolates variables, and delegates to a sub-agent. The prompt should be (with `<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, and `<PIPELINE>` replaced by their actual detected values):
-
-```
-[babysit:<PR_NUMBER>] Read the file `${CLAUDE_SKILL_DIR}/assets/build-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, `<BRANCH_NAME>` with `<BRANCH_NAME>`, and `<PIPELINE>` with `<PIPELINE>`. Then pass the fully interpolated prompt to the Agent tool with description "build-check PR #<PR_NUMBER>". Print the sub-agent's returned summary.
-```
-
-In the prompt text above, all template variables (`<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, `<PIPELINE>`) must be replaced with the actual values detected earlier — the cron prompt is stored with those values baked in. At cron execution time, the cron agent will read the asset file, perform the replacements, and delegate to a sub-agent via the Agent tool.
-
-### Steps 7 & 8: Run Immediate Checks (Parallel)
-
-Steps 7 and 8 **must be launched as parallel Agent tool calls** — dispatch both simultaneously and wait for both to complete before proceeding to Step 9.
-
-### Step 7: Run Immediate Comment Check
-
-**Skip this step if `--no-comments` was specified.**
-
-Run an immediate comment check so the user gets instant feedback on any existing review comments without waiting for the first cron tick. This step runs **in parallel** with Step 8.
+### Event type: `"comment"`
 
 1. Read the file `${CLAUDE_SKILL_DIR}/assets/comment-check-prompt.md`.
-2. In its contents, replace `<REPO>` with the detected repo value, `<PR_NUMBER>` with the detected PR number, and `<BRANCH_NAME>` with the detected branch name.
-3. Pass the fully interpolated prompt to the **Agent** tool with description `"comment-check PR #<PR_NUMBER>"` (with `<PR_NUMBER>` replaced by the actual PR number).
+2. In its contents, replace:
+   - `<REPO>` with the detected **REPO** value
+   - `<PR_NUMBER>` with the detected **PR_NUMBER** value
+   - `<BRANCH_NAME>` with the detected **BRANCH_NAME** value
+   - `<EVENT_JSON>` with the full JSON line from the notification
+   - `<FREEFORM_INSTRUCTIONS>` with the stored freeform instructions string (or `"None"` if none were provided)
+3. Pass the fully interpolated prompt to the **Agent** tool with description `"comment-check PR #<PR_NUMBER>"` (with actual PR number).
 4. Print the sub-agent's returned summary.
 
-### Step 8: Run Immediate Build Check
-
-**Skip this step if `--no-builds` was specified.**
-
-Run an immediate build check so the user gets instant feedback on any existing build failures. This step runs **in parallel** with Step 7.
+### Event type: `"build_failure"`
 
 1. Read the file `${CLAUDE_SKILL_DIR}/assets/build-check-prompt.md`.
-2. In its contents, replace `<REPO>` with the detected repo, `<PR_NUMBER>` with the detected PR number, `<BRANCH_NAME>` with the detected branch name, and `<PIPELINE>` with the detected pipeline slug.
-3. Pass the fully interpolated prompt to the Agent tool with description `"build-check PR #<PR_NUMBER>"` (where `<PR_NUMBER>` is the actual PR number).
+2. In its contents, replace:
+   - `<REPO>` with the detected **REPO** value
+   - `<PR_NUMBER>` with the detected **PR_NUMBER** value
+   - `<BRANCH_NAME>` with the detected **BRANCH_NAME** value
+   - `<PIPELINE>` with the detected **PIPELINE** value
+   - `<EVENT_JSON>` with the full JSON line from the notification
+   - `<FREEFORM_INSTRUCTIONS>` with the stored freeform instructions string (or `"None"` if none were provided)
+3. Pass the fully interpolated prompt to the **Agent** tool with description `"build-check PR #<PR_NUMBER>"` (with actual PR number).
+4. Print the sub-agent's returned summary.
 
-### Step 9: Print Confirmation
+### Event type: `"error"`
 
-**Only run this step after both Steps 7 and 8 have completed (or been skipped).**
+Print a warning message: "Polling degraded: <message>. Will retry next cycle." (where `<message>` is the value of the `message` field from the JSON event). Do **not** dispatch a sub-agent for error events.
 
-Print a confirmation message listing only the checks that were enabled. Replace `<REPO>`, `<PR_NUMBER>`, and `<BRANCH_NAME>` with the actual values.
+### Multiple events in one notification
 
-If both checks are enabled (default):
+If a single notification contains multiple JSON lines, dispatch a **separate sub-agent** for each `"comment"` or `"build_failure"` event. Error events are handled inline (print warning only). All sub-agent dispatches for a single notification may be launched in parallel.
 
-```
-PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
-- Review comments: checking every 5 minutes
-- Build status: checking every 2 minutes
-```
+## Confirmation Message
 
-If only comments are enabled (`--no-builds`):
-
-```
-PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
-- Review comments: checking every 5 minutes
-- Build status: disabled
-```
-
-If only builds are enabled (`--no-comments`):
+After the Monitor is launched, print the following confirmation message (replacing placeholders with actual values):
 
 ```
 PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
-- Review comments: disabled
-- Build status: checking every 2 minutes
+- Monitoring: every 30 seconds
+- Review comments: enabled/disabled
+- Build status: enabled/disabled (pipeline: <PIPELINE>)
 ```
+
+For the "Review comments" line: print `enabled` if comment monitoring is active, `disabled` if `--no-comments` was specified.
+
+For the "Build status" line: print `enabled (pipeline: <PIPELINE>)` if build monitoring is active (with actual pipeline slug), or `disabled` if `--no-builds` was specified.
 
 Then stop.
