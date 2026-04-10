@@ -165,17 +165,14 @@ poll_builds() {
 ###############################################################################
 
 while true; do
-  # Lock check: skip this cycle if another agent holds the lock
+  # Lock check: skip this cycle if the owning process is still alive
   if [[ -f "$LOCK_FILE" ]]; then
-    lock_mtime=$(stat -f %m "$LOCK_FILE" 2>/dev/null) || { sleep "$INTERVAL"; continue; }
-    now=$(date +%s)
-    age=$(( now - lock_mtime ))
-    if (( age > 600 )); then
-      rm -f "$LOCK_FILE"
-      echo '{"type":"error","source":"lock","message":"Removed stale poll lock (>10 min)"}'
-    else
+    if kill -0 "$BABYSIT_OWNER_PID" 2>/dev/null; then
       sleep "$INTERVAL"
       continue
+    else
+      rm -f "$LOCK_FILE"
+      echo '{"type":"error","source":"lock","message":"Removed orphaned poll lock (PID '"$BABYSIT_OWNER_PID"' is dead)"}'
     fi
   fi
 
