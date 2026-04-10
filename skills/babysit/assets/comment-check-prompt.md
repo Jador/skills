@@ -79,13 +79,7 @@ You are not confident in either agree or disagree, OR any of the following apply
 
 ## Step 3: Act
 
-All actions post a **single reply** to the last new comment in the thread — the comment with the highest `id` in `new_comment_ids`. This keeps the reply at the bottom of the conversation. Determine the reply target:
-
-```
-REPLY_TO_ID=$(echo '<EVENT_JSON>' | jq '[.new_comment_ids[]] | max')
-```
-
-The reply should address the thread holistically, not just the last comment.
+All actions post a **single reply** to the last new comment in the thread — the comment with the highest `id` in `new_comment_ids`. Use this as `<REPLY_TO_ID>` in the commands below. This keeps the reply at the bottom of the conversation. The reply should address the thread holistically, not just the last comment.
 
 ### If AGREE — Fix, Verify, Push, Reply
 
@@ -108,7 +102,7 @@ The reply should address the thread holistically, not just the last comment.
    Then stop and return an escalation summary.
 5. **Reply** to the last new comment confirming the fix via `gh api`:
    ```
-   gh api repos/<REPO>/pulls/<PR_NUMBER>/comments/${REPLY_TO_ID}/replies \
+   gh api repos/<REPO>/pulls/<PR_NUMBER>/comments/<REPLY_TO_ID>/replies \
      --method POST \
      -f body="<!-- babysit-agent -->
    > [!NOTE]
@@ -127,7 +121,7 @@ The reply should address the thread holistically, not just the last comment.
 
 1. **Reply** to the last new comment explaining why the change was not made via `gh api`:
    ```
-   gh api repos/<REPO>/pulls/<PR_NUMBER>/comments/${REPLY_TO_ID}/replies \
+   gh api repos/<REPO>/pulls/<PR_NUMBER>/comments/<REPLY_TO_ID>/replies \
      --method POST \
      -f body="<!-- babysit-agent -->
    > [!NOTE]
@@ -146,7 +140,7 @@ The reply should address the thread holistically, not just the last comment.
 
 1. **Post** an escalation notice via `gh api`:
    ```
-   gh api repos/<REPO>/pulls/<PR_NUMBER>/comments/${REPLY_TO_ID}/replies \
+   gh api repos/<REPO>/pulls/<PR_NUMBER>/comments/<REPLY_TO_ID>/replies \
      --method POST \
      -f body="<!-- babysit-agent -->
    > [!IMPORTANT]
