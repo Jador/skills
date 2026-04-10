@@ -180,16 +180,16 @@ This lock wraps the entire notification batch — acquire it once before handlin
 
 Handle each event according to its type:
 
-### Event type: `"comment"`
+### Event type: `"comment_thread"`
 
 1. Read the file `${CLAUDE_SKILL_DIR}/assets/comment-check-prompt.md`.
 2. In its contents, replace:
    - `<REPO>` with the detected **REPO** value
    - `<PR_NUMBER>` with the detected **PR_NUMBER** value
    - `<BRANCH_NAME>` with the detected **BRANCH_NAME** value
-   - `<EVENT_JSON>` with the full JSON line from the notification
+   - `<EVENT_JSON>` with the full JSON line from the notification (this is a thread event containing the full thread context and new comment IDs)
    - `<FREEFORM_INSTRUCTIONS>` with the stored freeform instructions string (or `"None"` if none were provided)
-3. Pass the fully interpolated prompt to the **Agent** tool with description `"comment-check PR #<PR_NUMBER>"` (with actual PR number).
+3. Pass the fully interpolated prompt to the **Agent** tool with description `"thread-check PR #<PR_NUMBER>"` (with actual PR number).
 4. Print the sub-agent's returned summary.
 
 ### Event type: `"build_failure"`
@@ -211,7 +211,7 @@ Print a warning message: "Polling degraded: <message>. Will retry next cycle." (
 
 ### Multiple events in one notification
 
-If a single notification contains multiple JSON lines, dispatch a **separate sub-agent** for each `"comment"` or `"build_failure"` event. Error events are handled inline (print warning only). All sub-agent dispatches for a single notification may be launched in parallel.
+If a single notification contains multiple JSON lines, dispatch a **separate sub-agent** for each `"comment_thread"` or `"build_failure"` event — one agent per thread, not per comment. Error events are handled inline (print warning only). All sub-agent dispatches for a single notification may be launched in parallel.
 
 ### Lock release
 
