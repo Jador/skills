@@ -35,7 +35,8 @@ If the remaining text is `stop` (case-insensitive):
 1. **List running tasks:** Use `TaskList` to retrieve all currently running tasks.
 2. **Filter for babysit monitors:** Examine each task's description for matches beginning with `babysit-monitor`. If no matching tasks are found, print: "No babysit monitors are currently running." Then stop.
 3. **Stop each match:** Use `TaskStop` on each matching task by its ID.
-4. **Print confirmation:** Print: "Stopped N babysit monitor(s)." (where N is the count of stopped tasks).
+4. **Remove poll lockfile:** Remove the poll lockfile if it exists: `rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll.lock`.
+5. **Print confirmation:** Print: "Stopped N babysit monitor(s)." (where N is the count of stopped tasks).
 
 Then stop — do not continue to Start mode.
 
@@ -56,7 +57,8 @@ If the remaining text is `clean` (case-insensitive):
    - If the state is `MERGED` or `CLOSED`: delete both `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json` and `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json` using `rm -f`. Report: "Cleaned state for PR #<PR_NUMBER> (<state>)."
    - If the state is `OPEN`: skip deletion. Report: "Preserved state for PR #<PR_NUMBER> (still open)."
 
-5. **Print summary:** Print a summary listing all PRs that were cleaned and all that were preserved.
+5. **Remove poll lockfile:** Remove the poll lockfile if it exists: `rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll.lock`.
+6. **Print summary:** Print a summary listing all PRs that were cleaned and all that were preserved.
 
 Then stop — do not continue to Start mode.
 
