@@ -90,22 +90,55 @@ poll_comments() {
     return
   }
 
-  # Process each comment: skip if already seen or if body contains babysit-agent marker
+  # Process comments: filter new ones, group by thread, emit one event per thread
   echo "$raw_comments" | jq -c --argjson seen "$seen_ids" '
-    .[] |
-    select(.id as $id | ($seen | map(. == $id) | any | not)) |
-    select(.body | contains("<!-- babysit-agent -->") | not) |
+    # Collect all comments into an array for lookups
+    [.[]] as $all |
+
+    # Find new comments: not seen and not self-authored by babysit-agent
+    [ $all[] |
+      select(.id as $id | ($seen | map(. == $id) | any | not)) |
+      select(.body | contains("<!-- babysit-agent -->") | not)
+    ] as $new |
+
+    # Nothing new? Emit nothing.
+    if ($new | length) == 0 then empty else
+
+    # Group new comments by thread root ID
+    ($new | map({ key: ((.in_reply_to_id // .id) | tostring), value: . }) | group_by(.key) |
+      map({ thread_root_id: (.[0].key | tonumber), new_comments: [.[].value] })
+    ) as $groups |
+
+    # For each thread group, build the full event
+    $groups[] |
+    .thread_root_id as $root_id |
+    .new_comments as $nc |
+
+    # Gather ALL comments in this thread (root + replies)
+    [ $all[] | select((.in_reply_to_id // .id) == $root_id) ] |
+    sort_by(.created_at) |
+
+    # Find the root comment for file/line/diff_hunk metadata
+    ( [ $all[] | select(.id == $root_id) ] | first // null ) as $root |
+
     {
-      type: "comment",
+      type: "comment_thread",
       pr: '"$PR"',
-      id: .id,
-      reviewer: .user.login,
-      file: .path,
-      line: (.line // .original_line // null),
-      body: .body,
-      diff_hunk: .diff_hunk,
-      created_at: .created_at
+      thread_root_id: $root_id,
+      new_comment_ids: [ $nc[] | .id ],
+      comments: [ .[] | {
+        id: .id,
+        user: { login: .user.login },
+        body: .body,
+        created_at: .created_at,
+        in_reply_to_id: .in_reply_to_id
+      }],
+      file: ($root.path // null),
+      line: (($root.line // $root.original_line) // null),
+      diff_hunk: ($root.diff_hunk // null)
     }
+
+    end
   ' 2>/dev/null || true
 }
 
