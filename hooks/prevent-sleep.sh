@@ -22,6 +22,7 @@ for f in "$SESSIONS_DIR"/*; do
 done
 
 # Restart caffeinate with fresh 1h timeout (safety net if Claude crashes)
+# -dims: display, idle, disk, system sleep. -s only works on AC power.
 if [ -f "$PID_FILE" ]; then
     pid=$(cat "$PID_FILE")
     if ps -p "$pid" -o args= 2>/dev/null | grep -q '^caffeinate'; then
@@ -29,5 +30,5 @@ if [ -f "$PID_FILE" ]; then
     fi
 fi
 
-nohup caffeinate -i -t 3600 > /dev/null 2>&1 &
+nohup caffeinate -dims -t 3600 > /dev/null 2>&1 &
 echo $! > "$PID_FILE"
