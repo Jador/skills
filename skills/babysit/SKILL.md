@@ -35,8 +35,7 @@ If the remaining text is `stop` (case-insensitive):
 1. **List running tasks:** Use `TaskList` to retrieve all currently running tasks.
 2. **Filter for babysit monitors:** Examine each task's description for matches beginning with `babysit-monitor`. If no matching tasks are found, print: "No babysit monitors are currently running." Then stop.
 3. **Stop each match:** Use `TaskStop` on each matching task by its ID.
-4. **Release poll lock:** Release any poll lock entry for the current owner in `${CLAUDE_PLUGIN_DATA}/babysit/state.db`.
-5. **Print confirmation:** Print: "Stopped N babysit monitor(s)." (where N is the count of stopped tasks).
+4. **Print confirmation:** Print: "Stopped N babysit monitor(s)." (where N is the count of stopped tasks).
 
 Then stop — do not continue to Start mode.
 
