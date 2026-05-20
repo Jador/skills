@@ -172,40 +172,22 @@ Examples:
 
 ## Start Mode — Dispatch Instructions
 
-When a `<task-notification>` arrives from the monitor, parse each line of the notification body as a JSON object. Each JSON object has a `type` field.
+When a `<task-notification>` arrives from the monitor, parse each line of the notification body as a JSON object. Each JSON object has a `type` field. Handle each line according to its type:
 
-### Lock acquisition
+### Event type: `"cluster_ready"`
 
-Before dispatching any sub-agents for a notification, acquire a lock entry in `${CLAUDE_PLUGIN_DATA}/babysit/state.db` to suppress polling during processing.
+The polling script emits this event when pending events have been queued and are ready for clustering and dispatch. The coordinator sub-agent owns clustering, atomic claims, file-disjoint wave packing, worker dispatch, and all state-database writes.
 
-This lock wraps the entire notification batch — acquire it once before handling any events from the notification.
-
-Handle each event according to its type:
-
-### Event type: `"comment_thread"`
-
-1. Read the file `${CLAUDE_SKILL_DIR}/assets/comment-check-prompt.md`.
+1. Read the file `${CLAUDE_SKILL_DIR}/assets/coordinator-prompt.md`.
 2. In its contents, replace:
    - `<REPO>` with the detected **REPO** value
    - `<PR_NUMBER>` with the detected **PR_NUMBER** value
    - `<BRANCH_NAME>` with the detected **BRANCH_NAME** value
-   - `<EVENT_JSON>` with the full JSON line from the notification (this is a thread event containing the full thread context and new comment IDs)
+   - `<PIPELINE>` with the detected **PIPELINE** value (or `"None"` if `--no-builds` was specified)
    - `<FREEFORM_INSTRUCTIONS>` with the stored freeform instructions string (or `"None"` if none were provided)
-3. Pass the fully interpolated prompt to the **Agent** tool with description `"thread-check PR #<PR_NUMBER>"` (with actual PR number).
-4. Print the sub-agent's returned summary.
-
-### Event type: `"build_failure"`
-
-1. Read the file `${CLAUDE_SKILL_DIR}/assets/build-check-prompt.md`.
-2. In its contents, replace:
-   - `<REPO>` with the detected **REPO** value
-   - `<PR_NUMBER>` with the detected **PR_NUMBER** value
-   - `<BRANCH_NAME>` with the detected **BRANCH_NAME** value
-   - `<PIPELINE>` with the detected **PIPELINE** value
-   - `<EVENT_JSON>` with the full JSON line from the notification
-   - `<FREEFORM_INSTRUCTIONS>` with the stored freeform instructions string (or `"None"` if none were provided)
-3. Pass the fully interpolated prompt to the **Agent** tool with description `"build-check PR #<PR_NUMBER>"` (with actual PR number).
-4. Print the sub-agent's returned summary.
+   - `<EVENT_COUNT>` with the `event_count` field from the JSON line (the number of pending events queued for this PR)
+3. Pass the fully interpolated prompt to the **Agent** tool with description `"coordinator PR #<PR_NUMBER>"` (with actual PR number).
+4. Print the coordinator's returned summary.
 
 ### Event type: `"error"`
 
@@ -213,13 +195,7 @@ Print a warning message: "Polling degraded: <message>. Will retry next cycle." (
 
 ### Multiple events in one notification
 
-If a single notification contains multiple JSON lines, dispatch a **separate sub-agent** for each `"comment_thread"` or `"build_failure"` event — one agent per thread, not per comment. Error events are handled inline (print warning only). All sub-agent dispatches for a single notification may be launched in parallel.
-
-### Lock release
-
-After all sub-agents for a notification have returned (or if there were only error events and no agents were dispatched), release the lock entry in `${CLAUDE_PLUGIN_DATA}/babysit/state.db`.
-
-This ensures the lock is held for the entire notification batch and released only once all processing is complete.
+If a single notification contains multiple JSON lines, handle each line according to its type. Multiple `cluster_ready` lines for the same PR are rare but possible; each one spawns its own coordinator invocation. Error lines are handled inline (print warning only).
 
 ## Confirmation Message
 
