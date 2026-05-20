@@ -74,9 +74,10 @@ if [[ -z "$PR" || -z "$BRANCH" ]]; then
   exit 1
 fi
 
-# State directory
+# State directory and database
 STATE_DIR="${CLAUDE_PLUGIN_DATA}/babysit"
-LOCK_FILE="${STATE_DIR}/poll-${BABYSIT_OWNER_PID}.lock"
+STATE_DB="${STATE_DIR}/state.db"
+LOCK_FILE="${STATE_DB}"
 
 ###############################################################################
 # Comment polling
@@ -87,7 +88,7 @@ poll_comments() {
     return
   fi
 
-  local seen_file="${STATE_DIR}/${PR}-seen-comments.json"
+  local seen_file="${STATE_DB}"
   local seen_ids="[]"
   if [[ -f "$seen_file" ]]; then
     seen_ids=$(cat "$seen_file")
@@ -160,7 +161,7 @@ poll_builds() {
     return
   fi
 
-  local seen_file="${STATE_DIR}/${PR}-seen-builds.json"
+  local seen_file="${STATE_DB}"
   local seen_builds="{}"
   if [[ -f "$seen_file" ]]; then
     seen_builds=$(cat "$seen_file")

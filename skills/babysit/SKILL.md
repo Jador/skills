@@ -35,7 +35,7 @@ If the remaining text is `stop` (case-insensitive):
 1. **List running tasks:** Use `TaskList` to retrieve all currently running tasks.
 2. **Filter for babysit monitors:** Examine each task's description for matches beginning with `babysit-monitor`. If no matching tasks are found, print: "No babysit monitors are currently running." Then stop.
 3. **Stop each match:** Use `TaskStop` on each matching task by its ID.
-4. **Remove poll lockfile:** Remove the poll lockfile if it exists: `rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll-$$.lock`.
+4. **Release poll lock:** Release any poll lock entry for the current owner in `${CLAUDE_PLUGIN_DATA}/babysit/state.db`.
 5. **Print confirmation:** Print: "Stopped N babysit monitor(s)." (where N is the count of stopped tasks).
 
 Then stop — do not continue to Start mode.
@@ -44,9 +44,9 @@ Then stop — do not continue to Start mode.
 
 If the remaining text is `clean` (case-insensitive):
 
-1. **Scan for state files:** List all files in `${CLAUDE_PLUGIN_DATA}/babysit/` matching the patterns `*-seen-comments.json` and `*-seen-builds.json`. If no matching files exist, print: "No babysit state files found." Then stop.
+1. **Scan for state:** Read PR numbers tracked in `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the database does not exist or contains no PR records, print: "No babysit state found." Then stop.
 
-2. **Extract PR numbers:** From the matching filenames, extract the PR number portion. Filenames follow the pattern `<PR_NUMBER>-seen-comments.json` and `<PR_NUMBER>-seen-builds.json`. Collect the unique set of PR numbers.
+2. **Extract PR numbers:** Collect the unique set of PR numbers tracked in `${CLAUDE_PLUGIN_DATA}/babysit/state.db`.
 
 3. **Check PR status:** For each unique PR number, run:
    ```
@@ -54,15 +54,14 @@ If the remaining text is `clean` (case-insensitive):
    ```
 
 4. **Clean or preserve:** For each PR number:
-   - If the state is `MERGED` or `CLOSED`: delete both `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json` and `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json` using `rm -f`. Report: "Cleaned state for PR #<PR_NUMBER> (<state>)."
+   - If the state is `MERGED` or `CLOSED`: delete state for that PR from `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. Report: "Cleaned state for PR #<PR_NUMBER> (<state>)."
    - If the state is `OPEN`: skip deletion. Report: "Preserved state for PR #<PR_NUMBER> (still open)."
 
-5. **Clean poll lockfiles:** Glob `${CLAUDE_PLUGIN_DATA}/babysit/poll-*.lock`. For each file:
-   - Extract the PID from the filename (the number between `poll-` and `.lock`).
+5. **Clean poll lockfiles:** Inspect `${CLAUDE_PLUGIN_DATA}/babysit/state.db` for any tracked poll-owner PID entries. For each entry:
    - Check if the PID is alive: `kill -0 <PID> 2>/dev/null`.
-   - If the PID is dead (command fails): remove the lock file with `rm -f` and report: "Removed orphaned lock for PID <PID>."
+   - If the PID is dead (command fails): remove the entry from `${CLAUDE_PLUGIN_DATA}/babysit/state.db` and report: "Removed orphaned lock for PID <PID>."
    - If the PID is alive (command succeeds): skip deletion and report: "Preserved active lock for PID <PID>."
-   - If no `poll-*.lock` files exist, report: "No poll lockfiles found."
+   - If no poll-owner entries exist, report: "No poll lockfiles found."
 6. **Print summary:** Print a summary listing all PRs that were cleaned and all that were preserved.
 
 Then stop — do not continue to Start mode.
@@ -101,7 +100,7 @@ Store the result (e.g., `owner/repo-name`) as **REPO**.
 
 **Check `bk` CLI is available:** Run `which bk`. If it fails, tell the user: "The `bk` CLI is required for build monitoring but not found on your PATH. Install it or use `--no-builds` to skip build monitoring." Then stop.
 
-1. **Check for saved pipeline:** Read `${CLAUDE_PLUGIN_DATA}/babysit/pipelines.json` if it exists. Parse it as a JSON object mapping `owner/repo` to pipeline slug. If an entry exists for the current **REPO**, use that slug as **PIPELINE**. Skip to Branch Divergence Check.
+1. **Check for saved pipeline:** Read the saved pipeline slug for the current **REPO** from `${CLAUDE_PLUGIN_DATA}/babysit/state.db` if it exists. If an entry exists for the current **REPO**, use that slug as **PIPELINE**. Skip to Branch Divergence Check.
 
 2. **Detect pipeline:** If no saved pipeline was found, run:
    ```
@@ -120,7 +119,7 @@ Store the result (e.g., `owner/repo-name`) as **REPO**.
      ```
      Then stop and wait for the user's response.
 
-4. **Save pipeline:** Save the selected pipeline to `${CLAUDE_PLUGIN_DATA}/babysit/pipelines.json`. The file is a JSON object mapping `owner/repo` to slug. If the file already exists, merge the new entry into the existing object. If it does not exist, create it with the single entry.
+4. **Save pipeline:** Save the selected pipeline to `${CLAUDE_PLUGIN_DATA}/babysit/state.db`, keyed by `owner/repo`. If an entry already exists for the current **REPO**, replace it; otherwise insert a new entry.
 
 ### Branch Divergence Check
 
@@ -144,10 +143,11 @@ Continue regardless — this is a warning only, not a blocker.
 Run:
 
 ```
-mkdir -p ${CLAUDE_PLUGIN_DATA}/babysit
+mkdir -p "${CLAUDE_PLUGIN_DATA}/babysit"
+sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" < "${CLAUDE_SKILL_DIR}/assets/schema.sql"
 ```
 
-This ensures the state directory exists for the polling script to write to.
+This ensures the state directory exists and bootstraps the SQLite schema at `${CLAUDE_PLUGIN_DATA}/babysit/state.db` for the polling script and sub-agents to read and write.
 
 ## Start Mode — Launch Monitor
 
@@ -176,11 +176,7 @@ When a `<task-notification>` arrives from the monitor, parse each line of the no
 
 ### Lock acquisition
 
-Before dispatching any sub-agents for a notification, acquire a lockfile to suppress polling during processing:
-
-```
-touch ${CLAUDE_PLUGIN_DATA}/babysit/poll-$$.lock
-```
+Before dispatching any sub-agents for a notification, acquire a lock entry in `${CLAUDE_PLUGIN_DATA}/babysit/state.db` to suppress polling during processing.
 
 This lock wraps the entire notification batch — acquire it once before handling any events from the notification.
 
@@ -221,11 +217,7 @@ If a single notification contains multiple JSON lines, dispatch a **separate sub
 
 ### Lock release
 
-After all sub-agents for a notification have returned (or if there were only error events and no agents were dispatched), release the lockfile:
-
-```
-rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll-$$.lock
-```
+After all sub-agents for a notification have returned (or if there were only error events and no agents were dispatched), release the lock entry in `${CLAUDE_PLUGIN_DATA}/babysit/state.db`.
 
 This ensures the lock is held for the entire notification batch and released only once all processing is complete.
 

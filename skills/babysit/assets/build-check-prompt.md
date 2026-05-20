@@ -55,7 +55,7 @@ This is a JSON object with the following fields:
 
 ## Step 2: Load State
 
-Read the state file at `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json` using `jq`. If it does not exist, create it with the content `{}`.
+Read the state file at `${CLAUDE_PLUGIN_DATA}/babysit/state.db` using `jq`. If it does not exist, create it with the content `{}`.
 
 This file is a JSON object mapping build numbers (as string keys) to objects with the shape:
 

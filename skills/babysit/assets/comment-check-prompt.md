@@ -112,9 +112,9 @@ All actions post a **single reply** to the last new comment in the thread — th
 6. **Update state**: Append **all** IDs from `new_comment_ids` to the seen array in one operation:
    ```
    mkdir -p ${CLAUDE_PLUGIN_DATA}/babysit
-   SEEN=$(cat ${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json 2>/dev/null || echo "[]")
+   SEEN=$(cat ${CLAUDE_PLUGIN_DATA}/babysit/state.db 2>/dev/null || echo "[]")
    NEW_IDS=$(echo '<EVENT_JSON>' | jq '[.new_comment_ids[]]')
-   echo "$SEEN" | jq --argjson new "$NEW_IDS" '. + $new' > ${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json
+   echo "$SEEN" | jq --argjson new "$NEW_IDS" '. + $new' > ${CLAUDE_PLUGIN_DATA}/babysit/state.db
    ```
 
 ### If DISAGREE — Reply with Rationale
@@ -131,9 +131,9 @@ All actions post a **single reply** to the last new comment in the thread — th
 2. **Update state**: Append **all** IDs from `new_comment_ids` to the seen array in one operation:
    ```
    mkdir -p ${CLAUDE_PLUGIN_DATA}/babysit
-   SEEN=$(cat ${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json 2>/dev/null || echo "[]")
+   SEEN=$(cat ${CLAUDE_PLUGIN_DATA}/babysit/state.db 2>/dev/null || echo "[]")
    NEW_IDS=$(echo '<EVENT_JSON>' | jq '[.new_comment_ids[]]')
-   echo "$SEEN" | jq --argjson new "$NEW_IDS" '. + $new' > ${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json
+   echo "$SEEN" | jq --argjson new "$NEW_IDS" '. + $new' > ${CLAUDE_PLUGIN_DATA}/babysit/state.db
    ```
 
 ### If ESCALATE — Post Escalation Notice
@@ -152,9 +152,9 @@ All actions post a **single reply** to the last new comment in the thread — th
 2. **Update state**: Append **all** IDs from `new_comment_ids` to the seen array in one operation:
    ```
    mkdir -p ${CLAUDE_PLUGIN_DATA}/babysit
-   SEEN=$(cat ${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json 2>/dev/null || echo "[]")
+   SEEN=$(cat ${CLAUDE_PLUGIN_DATA}/babysit/state.db 2>/dev/null || echo "[]")
    NEW_IDS=$(echo '<EVENT_JSON>' | jq '[.new_comment_ids[]]')
-   echo "$SEEN" | jq --argjson new "$NEW_IDS" '. + $new' > ${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json
+   echo "$SEEN" | jq --argjson new "$NEW_IDS" '. + $new' > ${CLAUDE_PLUGIN_DATA}/babysit/state.db
    ```
 3. **Return escalation details** in your summary to the parent session so it can track unresolved escalations.
 
