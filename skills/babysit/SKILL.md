@@ -23,10 +23,13 @@ Parse `$ARGUMENTS` to determine the mode of operation. Before mode detection, ex
 
 - `--no-comments` — disables comment monitoring
 - `--no-builds` — disables build monitoring
+- `--dry-run` — (Clean mode only) print intended deletions and stale-cluster reaps without modifying the database
 
 Strip these flags from `$ARGUMENTS` before proceeding with mode detection below. The remaining text (after flag removal and trimming whitespace) is used for mode selection.
 
 If both `--no-comments` and `--no-builds` are specified, tell the user: "Both checks are disabled — nothing to monitor." Then stop.
+
+The `--dry-run` flag is only meaningful for Clean mode. If `--dry-run` is supplied alongside `stop` or Start mode, ignore it silently.
 
 ### Mode: Stop
 
@@ -43,25 +46,95 @@ Then stop — do not continue to Start mode.
 
 If the remaining text is `clean` (case-insensitive):
 
-1. **Scan for state:** Read PR numbers tracked in `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the database does not exist or contains no PR records, print: "No babysit state found." Then stop.
+If `--dry-run` was specified, print a banner first:
 
-2. **Extract PR numbers:** Collect the unique set of PR numbers tracked in `${CLAUDE_PLUGIN_DATA}/babysit/state.db`.
+```
+=== DRY RUN — no changes will be written ===
+```
 
-3. **Check PR status:** For each unique PR number, run:
+1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, print: "No babysit state found." Then stop.
+
+2. **Collect tracked PRs:** Connect to the database via `sqlite3` and run:
    ```
-   gh pr view <PR_NUMBER> --json state --jq .state
+   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "SELECT DISTINCT pr FROM seen_events;"
    ```
+   This yields the set of PR numbers tracked across all events. If the result is empty, print: "No babysit state found." Then stop.
 
-4. **Clean or preserve:** For each PR number:
-   - If the state is `MERGED` or `CLOSED`: delete state for that PR from `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. Report: "Cleaned state for PR #<PR_NUMBER> (<state>)."
-   - If the state is `OPEN`: skip deletion. Report: "Preserved state for PR #<PR_NUMBER> (still open)."
+3. **Check each PR's GitHub state:** For each unique PR number, run:
+   ```
+   gh pr view <PR_NUMBER> --json state --jq .state 2>/tmp/babysit-gh-err.$$
+   ```
+   Capture both the stdout (the state string) and the exit code (`$?`).
 
-5. **Clean poll lockfiles:** Inspect `${CLAUDE_PLUGIN_DATA}/babysit/state.db` for any tracked poll-owner PID entries. For each entry:
-   - Check if the PID is alive: `kill -0 <PID> 2>/dev/null`.
-   - If the PID is dead (command fails): remove the entry from `${CLAUDE_PLUGIN_DATA}/babysit/state.db` and report: "Removed orphaned lock for PID <PID>."
-   - If the PID is alive (command succeeds): skip deletion and report: "Preserved active lock for PID <PID>."
-   - If no poll-owner entries exist, report: "No poll lockfiles found."
-6. **Print summary:** Print a summary listing all PRs that were cleaned and all that were preserved.
+   Classify each PR as follows:
+   - Exit code `0` and stdout is `OPEN`: **preserve** (still open).
+   - Exit code `0` and stdout is `MERGED` or `CLOSED`: **mark for purge**.
+   - Non-zero exit code AND the stderr file mentions "Could not resolve" or "no pull requests found" (i.e., the PR no longer exists / 404): **mark for purge**.
+   - Non-zero exit code with any other stderr (network blip, auth error, rate limit): print "could not determine state for PR <PR_NUMBER>; skipping" and **do not purge** this PR.
+
+   Clean up `/tmp/babysit-gh-err.$$` after each check.
+
+4. **Purge marked PRs:** For each PR marked for purge:
+   - Print the intended deletes, e.g.:
+     ```
+     Would purge PR #<PR_NUMBER> (<state>): rows from seen_events, worker_reports, clusters, pending_events
+     ```
+   - If `--dry-run` was NOT specified, execute the deletion in a single transaction. Bind `<PR_NUMBER>` to the `?` placeholders:
+     ```
+     sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" <<SQL
+     BEGIN;
+     DELETE FROM seen_events WHERE pr=<PR_NUMBER>;
+     DELETE FROM worker_reports WHERE cluster_id IN (SELECT cluster_id FROM clusters WHERE pr=<PR_NUMBER>);
+     DELETE FROM clusters WHERE pr=<PR_NUMBER>;
+     DELETE FROM pending_events WHERE pr=<PR_NUMBER>;
+     COMMIT;
+     SQL
+     ```
+     Then report: "Purged PR #<PR_NUMBER> (<state>)."
+   - For preserved PRs, report: "Preserved PR #<PR_NUMBER> (still open)."
+
+5. **Stale-cluster reap:** Filesystem lockfiles are gone — abandoned cluster rows in the database are the new safety net for crashed coordinators/workers. Run:
+   ```
+   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "SELECT cluster_id, pr FROM clusters WHERE status='running';"
+   ```
+   For each running cluster, cross-check against the live agent task list using the `TaskList` tool. A cluster is considered **live** if any running task's description matches one of:
+   - `coordinator PR #<pr>` (where `<pr>` is the cluster's `pr` column)
+   - any description beginning with `worker ` (worker tasks are tied to clusters via `cluster_id` in the DB, so any live worker task is treated as evidence that some cluster work is in flight)
+
+   If no live task matches for a given running cluster, mark it as a stale-cluster candidate. Print the intended reap, e.g.:
+   ```
+   Would mark cluster <cluster_id> (PR #<pr>) as abandoned — no live coordinator/worker task
+   ```
+   If `--dry-run` was NOT specified, run:
+   ```
+   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "UPDATE clusters SET status='abandoned' WHERE cluster_id='<cluster_id>';"
+   ```
+   Then report: "Reaped stale cluster <cluster_id> (PR #<pr>) — marked abandoned."
+
+6. **Vacuum:** If `--dry-run` was NOT specified, reclaim space:
+   ```
+   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "VACUUM;"
+   ```
+   Skip this step entirely in dry-run mode.
+
+7. **Print summary:** Print a final summary block. If `--dry-run` was specified, prefix the summary with the dry-run banner repeated:
+   ```
+   === DRY RUN — no changes were written ===
+   ```
+   The summary must list:
+   - Count of PRs purged (or that would be purged in dry-run)
+   - Count of PRs preserved (still open)
+   - Count of PRs skipped due to transient errors (if any)
+   - Count of stale clusters reaped (or that would be reaped in dry-run)
+
+   Example:
+   ```
+   Babysit clean summary:
+   - PRs purged:    3
+   - PRs preserved: 2
+   - PRs skipped:   0
+   - Clusters reaped: 1
+   ```
 
 Then stop — do not continue to Start mode.
 
