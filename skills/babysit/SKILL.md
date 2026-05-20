@@ -16,6 +16,17 @@ Before doing anything, verify the environment:
 1. **Check `gh` CLI is available:** Run `which gh`. If it fails, tell the user: "The `gh` CLI is required but not found on your PATH. Install it from https://cli.github.com/ and try again." Then stop.
 2. **Check this is a git repo:** Run `git rev-parse --is-inside-work-tree`. If it fails, tell the user: "This command must be run from inside a git repository." Then stop.
 3. **Check `jq` is available:** Run `which jq`. If it fails, tell the user: "The `jq` CLI is required but not found on your PATH. Install it via your package manager and try again." Then stop.
+4. **Check `sqlite3` is available:** Run `which sqlite3`. If it fails, tell the user: "The `sqlite3` CLI is required but not found on your PATH. Install it via your package manager and try again." Then stop.
+
+### First-time setup after upgrade
+
+If you are upgrading from a pre-SQLite version of this skill, you must run the one-time migration script before first use:
+
+```
+bash "${CLAUDE_SKILL_DIR}/assets/migrate.sh"
+```
+
+This converts any legacy filesystem-based state into the new SQLite database at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. The script is idempotent — it is safe to run again, but only needs to succeed once per machine. If you have never used this skill before, you can skip the migration; the schema bootstrap in Start mode will create a fresh database for you.
 
 ## Argument Parsing
 
@@ -141,6 +152,14 @@ Then stop — do not continue to Start mode.
 ### Mode: Start (default)
 
 If the remaining text is neither `stop` nor `clean` (case-insensitive), enter Start mode. Any remaining text after flag removal is the **freeform instructions** string. Store it for later use (it will be passed to sub-agents as `<FREEFORM_INSTRUCTIONS>`). If the remaining text is empty or blank, the freeform instructions value is `"None"`.
+
+## Architecture
+
+All persistent state lives in a single SQLite database at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. All writes are atomic — SQLite transactions replace the filesystem lockfiles used by earlier versions of this skill. There are no `.lock` files, no `flock` calls, and no directory-based mutexes anywhere in the pipeline.
+
+The poll script writes raw GitHub and Buildkite events into the `pending_events` table and emits a `cluster_ready` notification. The coordinator sub-agent reads those pending rows, clusters them via LLM reasoning, and dispatches workers only when the file sets touched by each cluster are disjoint. The coordinator owns all writes to `seen_events` — workers and the poll script never touch that table directly.
+
+Workers return strict JSON to the coordinator and do not write to the state database themselves. This keeps the write path single-threaded per cluster and avoids any need for worker-side locking.
 
 ## Start Mode — Detection
 
