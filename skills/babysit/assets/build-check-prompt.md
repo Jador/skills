@@ -6,7 +6,19 @@ Your job: receive a single build failure event, assess it, and take one of four 
 
 ## JSON Parsing
 
-Use `jq` for all JSON parsing and manipulation throughout this prompt. Use `jq` to read, query, and update state files. Do not parse JSON by hand or with string matching — always use `jq`.
+Use `jq` for all JSON parsing and manipulation throughout this prompt. Use `jq` to read and query event data. Do not parse JSON by hand or with string matching — always use `jq`.
+
+---
+
+## Step 0: Branch Verification
+
+Before doing anything else, verify you are on the expected branch:
+
+```
+CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
+```
+
+If `$CURRENT_BRANCH` is not equal to `<BRANCH_NAME>`, abort immediately. Do NOT take any action (no fix, no retry, no escalate). Skip directly to the **Return** section and emit a JSON block with empty `resolved_event_ids` and `summary: "Branch mismatch: expected <BRANCH_NAME>, got $CURRENT_BRANCH"`.
 
 ---
 
@@ -32,6 +44,20 @@ This is a JSON object with the following fields:
 
 ---
 
+## Prior Attempts
+
+The coordinator pre-computes the number of prior fix attempts for this build from its own state database and injects it here:
+
+```
+PRIOR_ATTEMPTS=<PRIOR_ATTEMPTS>
+```
+
+If `<PRIOR_ATTEMPTS>` is `>= 3`, go directly to the **Escalate** action path — do not attempt another fix or retry. The escalation reason should mention that the 3-attempt limit has been reached.
+
+You do NOT read or write any state file. The coordinator owns all state.
+
+---
+
 ## Step 1: Gather Info
 
 1. **Parse the event JSON** to extract the build number and the list of failing jobs (jobs where `state` is not `"passed"`).
@@ -53,26 +79,7 @@ This is a JSON object with the following fields:
 
 ---
 
-## Step 2: Load State
-
-Read the state file at `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json` using `jq`. If it does not exist, create it with the content `{}`.
-
-This file is a JSON object mapping build numbers (as string keys) to objects with the shape:
-
-```json
-{
-  "<build_number>": {
-    "status": "skipped" | "fixed" | "retried" | "escalated",
-    "attempts": <number>
-  }
-}
-```
-
-Check the current attempt count for this build number. If `attempts >= 3`, go directly to the **Escalate** action path — do not attempt another fix.
-
----
-
-## Step 3: Assess and Act
+## Step 2: Assess and Act
 
 Analyze the failure logs from Step 1 against the PR diff files. Choose exactly one of the four action paths below.
 
@@ -109,9 +116,13 @@ A failure is considered **related** if ANY of the following are true:
 
    **If the push fails due to conflicts or rejected updates:** Do NOT force-push. Go to the **Escalate** action path instead.
 
-8. Update the state file: set the build entry to `{ "status": "fixed", "attempts": <n+1> }` where `n` is the current attempt count (0 if first attempt).
+8. Capture the new commit SHA for the return JSON:
 
-**Return:** `"Fixed <description> in build #<build_number> (attempt <n+1>/3)"`
+   ```
+   COMMIT_SHA=$(git rev-parse HEAD)
+   ```
+
+**Result:** This is a resolution. `resolved_event_ids` = `[<build_number>]` in the return JSON.
 
 ### Retry (flaky/unrelated test)
 
@@ -125,9 +136,7 @@ Choose this when the failure is in a **test outside the PR diff**, matches a **k
    bk job retry <job_id>
    ```
 
-2. Update the state file: set the build entry to `{ "status": "retried", "attempts": <n+1> }`.
-
-**Return:** `"Retried flaky <test/job name> in build #<build_number>"`
+**Result:** This is a resolution (the failure is being handled). `resolved_event_ids` = `[<build_number>]` in the return JSON.
 
 ### Skip (unrelated, non-retriable)
 
@@ -135,8 +144,7 @@ Choose this when the failure is a **pre-existing failure** on the base branch, a
 
 **Steps:**
 
-1. Update the state file: set the build entry to `{ "status": "skipped", "attempts": 0 }`.
-2. Print the skip reason to the terminal:
+1. Print the skip reason to the terminal:
 
    ```
    [babysit] Skipping unrelated build failure in build #<build_number> for PR #<PR_NUMBER>.
@@ -144,14 +152,14 @@ Choose this when the failure is a **pre-existing failure** on the base branch, a
    Reason: <why this failure is unrelated and non-retriable>
    ```
 
-**Return:** `"Skipped unrelated failure in build #<build_number> — <reason>"`
+**Result:** This is a resolution (the failure has been triaged and intentionally dropped). `resolved_event_ids` = `[<build_number>]` in the return JSON.
 
 ### Escalate
 
 Choose this when ANY of the following are true:
 
 - You are **not confident** in the assessment (unclear whether related or flaky).
-- The build has **3 or more failed attempts** (the attempt limit has been reached).
+- The build has **3 or more prior fix attempts** (`<PRIOR_ATTEMPTS>` is `>= 3`).
 - **Freeform instructions** (see below) direct escalation for this case.
 - A **push failed** due to conflicts during a fix attempt.
 
@@ -170,11 +178,7 @@ Choose this when ANY of the following are true:
 
    The comment MUST include `<!-- babysit-agent -->` on the first line and `🤖✋` in the callout header.
 
-2. Update the state file: set the build entry to `{ "status": "escalated", "attempts": <n+1> }`.
-
-3. Return escalation details in the summary.
-
-**Return:** `"Escalated build #<build_number> — <reason>"`
+**Result:** This is NOT a resolution — the caller needs to know the failure is still open. `resolved_event_ids` = `[]` (empty) in the return JSON. Put the build number in `unresolved_event_ids` instead.
 
 ---
 
@@ -188,10 +192,10 @@ Freeform instructions layer on top of the default behavior above. They can **tig
 
 ## Important Rules
 
-- **Max 3 fix attempts per build, then escalate.** Each fix attempt increments the `attempts` counter. After 3 attempts, always escalate — do not attempt another fix or retry.
+- **Max 3 fix attempts per build, then escalate.** The coordinator passes the count via `<PRIOR_ATTEMPTS>`. If it is `>= 3`, always escalate — do not attempt another fix or retry.
 - **Never force-push.** If a regular `git push` fails, escalate to the user. Never use `git push --force` or `git push --force-with-lease`.
 - **Conservative fixes only.** Only change what is necessary to fix the failing build. Do not bundle in unrelated improvements or refactors.
-- **Always update the state file** after taking any action, before returning.
+- **No state writes.** Do NOT read or write any state file. The coordinator owns all state and tracks attempts/resolution via the JSON you return.
 - **Fetch per-job logs only** (`bk job log <job_id>`), not full build output.
 - **Escalation comments** MUST include `<!-- babysit-agent -->` on the first line and `🤖✋` in the callout header.
 - **If any command fails unexpectedly** (e.g., `bk` CLI errors, network issues), escalate with a diagnostic message rather than silently failing.
@@ -200,9 +204,26 @@ Freeform instructions layer on top of the default behavior above. They can **tig
 
 ## Return
 
-End with a brief one-line summary of what you did. Examples:
+The LAST output of your response must be a single fenced JSON block with exactly this shape:
 
-- `"Fixed lint failure in build #789 (attempt 2/3)"`
-- `"Retried flaky geocoding test in build #790"`
-- `"Skipped unrelated failure in build #791 — pre-existing test failure on main"`
-- `"Escalated build #792 — 3 failed fix attempts"`
+```json
+{"resolved_event_ids":[...], "unresolved_event_ids":[...], "files_touched":[...], "commit_sha":"...", "summary":"..."}
+```
+
+Field meanings:
+
+- `resolved_event_ids` — array containing `<build_number>` if the failure was handled (fix, retry, or skip); empty `[]` on escalate or branch mismatch.
+- `unresolved_event_ids` — array containing `<build_number>` on escalate (so the coordinator knows the failure is still open); empty `[]` on fix/retry/skip.
+- `files_touched` — array of file paths modified during a fix; empty `[]` for retry, skip, escalate, and branch-mismatch paths.
+- `commit_sha` — the pushed commit SHA on fix; empty string `""` for retry, skip, escalate, and branch-mismatch paths.
+- `summary` — a one-line human-readable description of what you did.
+
+Examples:
+
+- Fix: `{"resolved_event_ids":[789],"unresolved_event_ids":[],"files_touched":["src/parser.ts"],"commit_sha":"abc1234...","summary":"Fixed lint failure in build #789"}`
+- Retry: `{"resolved_event_ids":[790],"unresolved_event_ids":[],"files_touched":[],"commit_sha":"","summary":"Retried flaky geocoding test in build #790"}`
+- Skip: `{"resolved_event_ids":[791],"unresolved_event_ids":[],"files_touched":[],"commit_sha":"","summary":"Skipped unrelated failure in build #791 — pre-existing test failure on main"}`
+- Escalate: `{"resolved_event_ids":[],"unresolved_event_ids":[792],"files_touched":[],"commit_sha":"","summary":"Escalated build #792 — 3 failed fix attempts"}`
+- Branch mismatch: `{"resolved_event_ids":[],"unresolved_event_ids":[],"files_touched":[],"commit_sha":"","summary":"Branch mismatch: expected <BRANCH_NAME>, got $CURRENT_BRANCH"}`
+
+The fenced ```json block must be the final thing in your output — do not add any text after it.

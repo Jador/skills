@@ -16,6 +16,17 @@ Before doing anything, verify the environment:
 1. **Check `gh` CLI is available:** Run `which gh`. If it fails, tell the user: "The `gh` CLI is required but not found on your PATH. Install it from https://cli.github.com/ and try again." Then stop.
 2. **Check this is a git repo:** Run `git rev-parse --is-inside-work-tree`. If it fails, tell the user: "This command must be run from inside a git repository." Then stop.
 3. **Check `jq` is available:** Run `which jq`. If it fails, tell the user: "The `jq` CLI is required but not found on your PATH. Install it via your package manager and try again." Then stop.
+4. **Check `sqlite3` is available:** Run `which sqlite3`. If it fails, tell the user: "The `sqlite3` CLI is required but not found on your PATH. Install it via your package manager and try again." Then stop.
+
+### First-time setup after upgrade
+
+If you are upgrading from a pre-SQLite version of this skill, you must run the one-time migration script before first use:
+
+```
+bash "${CLAUDE_SKILL_DIR}/assets/migrate.sh"
+```
+
+This converts any legacy filesystem-based state into the new SQLite database at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. The script is idempotent — it is safe to run again, but only needs to succeed once per machine. If you have never used this skill before, you can skip the migration; the schema bootstrap in Start mode will create a fresh database for you.
 
 ## Argument Parsing
 
@@ -23,10 +34,13 @@ Parse `$ARGUMENTS` to determine the mode of operation. Before mode detection, ex
 
 - `--no-comments` — disables comment monitoring
 - `--no-builds` — disables build monitoring
+- `--dry-run` — (Clean mode only) print intended deletions and stale-cluster reaps without modifying the database
 
 Strip these flags from `$ARGUMENTS` before proceeding with mode detection below. The remaining text (after flag removal and trimming whitespace) is used for mode selection.
 
 If both `--no-comments` and `--no-builds` are specified, tell the user: "Both checks are disabled — nothing to monitor." Then stop.
+
+The `--dry-run` flag is only meaningful for Clean mode. If `--dry-run` is supplied alongside `stop` or Start mode, ignore it silently.
 
 ### Mode: Stop
 
@@ -35,8 +49,7 @@ If the remaining text is `stop` (case-insensitive):
 1. **List running tasks:** Use `TaskList` to retrieve all currently running tasks.
 2. **Filter for babysit monitors:** Examine each task's description for matches beginning with `babysit-monitor`. If no matching tasks are found, print: "No babysit monitors are currently running." Then stop.
 3. **Stop each match:** Use `TaskStop` on each matching task by its ID.
-4. **Remove poll lockfile:** Remove the poll lockfile if it exists: `rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll-$$.lock`.
-5. **Print confirmation:** Print: "Stopped N babysit monitor(s)." (where N is the count of stopped tasks).
+4. **Print confirmation:** Print: "Stopped N babysit monitor(s)." (where N is the count of stopped tasks).
 
 Then stop — do not continue to Start mode.
 
@@ -44,32 +57,109 @@ Then stop — do not continue to Start mode.
 
 If the remaining text is `clean` (case-insensitive):
 
-1. **Scan for state files:** List all files in `${CLAUDE_PLUGIN_DATA}/babysit/` matching the patterns `*-seen-comments.json` and `*-seen-builds.json`. If no matching files exist, print: "No babysit state files found." Then stop.
+If `--dry-run` was specified, print a banner first:
 
-2. **Extract PR numbers:** From the matching filenames, extract the PR number portion. Filenames follow the pattern `<PR_NUMBER>-seen-comments.json` and `<PR_NUMBER>-seen-builds.json`. Collect the unique set of PR numbers.
+```
+=== DRY RUN — no changes will be written ===
+```
 
-3. **Check PR status:** For each unique PR number, run:
+1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, print: "No babysit state found." Then stop.
+
+2. **Collect tracked PRs:** Connect to the database via `sqlite3` and run:
    ```
-   gh pr view <PR_NUMBER> --json state --jq .state
+   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "SELECT DISTINCT pr FROM seen_events;"
    ```
+   This yields the set of PR numbers tracked across all events. If the result is empty, print: "No babysit state found." Then stop.
 
-4. **Clean or preserve:** For each PR number:
-   - If the state is `MERGED` or `CLOSED`: delete both `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-comments.json` and `${CLAUDE_PLUGIN_DATA}/babysit/<PR_NUMBER>-seen-builds.json` using `rm -f`. Report: "Cleaned state for PR #<PR_NUMBER> (<state>)."
-   - If the state is `OPEN`: skip deletion. Report: "Preserved state for PR #<PR_NUMBER> (still open)."
+3. **Check each PR's GitHub state:** For each unique PR number, run:
+   ```
+   gh pr view <PR_NUMBER> --json state --jq .state 2>/tmp/babysit-gh-err.$$
+   ```
+   Capture both the stdout (the state string) and the exit code (`$?`).
 
-5. **Clean poll lockfiles:** Glob `${CLAUDE_PLUGIN_DATA}/babysit/poll-*.lock`. For each file:
-   - Extract the PID from the filename (the number between `poll-` and `.lock`).
-   - Check if the PID is alive: `kill -0 <PID> 2>/dev/null`.
-   - If the PID is dead (command fails): remove the lock file with `rm -f` and report: "Removed orphaned lock for PID <PID>."
-   - If the PID is alive (command succeeds): skip deletion and report: "Preserved active lock for PID <PID>."
-   - If no `poll-*.lock` files exist, report: "No poll lockfiles found."
-6. **Print summary:** Print a summary listing all PRs that were cleaned and all that were preserved.
+   Classify each PR as follows:
+   - Exit code `0` and stdout is `OPEN`: **preserve** (still open).
+   - Exit code `0` and stdout is `MERGED` or `CLOSED`: **mark for purge**.
+   - Non-zero exit code AND the stderr file mentions "Could not resolve" or "no pull requests found" (i.e., the PR no longer exists / 404): **mark for purge**.
+   - Non-zero exit code with any other stderr (network blip, auth error, rate limit): print "could not determine state for PR <PR_NUMBER>; skipping" and **do not purge** this PR.
+
+   Clean up `/tmp/babysit-gh-err.$$` after each check.
+
+4. **Purge marked PRs:** For each PR marked for purge:
+   - Print the intended deletes, e.g.:
+     ```
+     Would purge PR #<PR_NUMBER> (<state>): rows from seen_events, worker_reports, clusters, pending_events
+     ```
+   - If `--dry-run` was NOT specified, execute the deletion in a single transaction. Bind `<PR_NUMBER>` to the `?` placeholders:
+     ```
+     sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" <<SQL
+     BEGIN;
+     DELETE FROM seen_events WHERE pr=<PR_NUMBER>;
+     DELETE FROM worker_reports WHERE cluster_id IN (SELECT cluster_id FROM clusters WHERE pr=<PR_NUMBER>);
+     DELETE FROM clusters WHERE pr=<PR_NUMBER>;
+     DELETE FROM pending_events WHERE pr=<PR_NUMBER>;
+     COMMIT;
+     SQL
+     ```
+     Then report: "Purged PR #<PR_NUMBER> (<state>)."
+   - For preserved PRs, report: "Preserved PR #<PR_NUMBER> (still open)."
+
+5. **Stale-cluster reap:** Filesystem lockfiles are gone — abandoned cluster rows in the database are the new safety net for crashed coordinators/workers. Run:
+   ```
+   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "SELECT cluster_id, pr FROM clusters WHERE status='running';"
+   ```
+   For each running cluster, cross-check against the live agent task list using the `TaskList` tool. A cluster is considered **live** if any running task's description matches one of:
+   - `coordinator PR #<pr>` (where `<pr>` is the cluster's `pr` column)
+   - any description beginning with `worker ` (worker tasks are tied to clusters via `cluster_id` in the DB, so any live worker task is treated as evidence that some cluster work is in flight)
+
+   If no live task matches for a given running cluster, mark it as a stale-cluster candidate. Print the intended reap, e.g.:
+   ```
+   Would mark cluster <cluster_id> (PR #<pr>) as abandoned — no live coordinator/worker task
+   ```
+   If `--dry-run` was NOT specified, run:
+   ```
+   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "UPDATE clusters SET status='abandoned' WHERE cluster_id='<cluster_id>';"
+   ```
+   Then report: "Reaped stale cluster <cluster_id> (PR #<pr>) — marked abandoned."
+
+6. **Vacuum:** If `--dry-run` was NOT specified, reclaim space:
+   ```
+   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "VACUUM;"
+   ```
+   Skip this step entirely in dry-run mode.
+
+7. **Print summary:** Print a final summary block. If `--dry-run` was specified, prefix the summary with the dry-run banner repeated:
+   ```
+   === DRY RUN — no changes were written ===
+   ```
+   The summary must list:
+   - Count of PRs purged (or that would be purged in dry-run)
+   - Count of PRs preserved (still open)
+   - Count of PRs skipped due to transient errors (if any)
+   - Count of stale clusters reaped (or that would be reaped in dry-run)
+
+   Example:
+   ```
+   Babysit clean summary:
+   - PRs purged:    3
+   - PRs preserved: 2
+   - PRs skipped:   0
+   - Clusters reaped: 1
+   ```
 
 Then stop — do not continue to Start mode.
 
 ### Mode: Start (default)
 
 If the remaining text is neither `stop` nor `clean` (case-insensitive), enter Start mode. Any remaining text after flag removal is the **freeform instructions** string. Store it for later use (it will be passed to sub-agents as `<FREEFORM_INSTRUCTIONS>`). If the remaining text is empty or blank, the freeform instructions value is `"None"`.
+
+## Architecture
+
+All persistent state lives in a single SQLite database at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. All writes are atomic — SQLite transactions replace the filesystem lockfiles used by earlier versions of this skill. There are no `.lock` files, no `flock` calls, and no directory-based mutexes anywhere in the pipeline.
+
+The poll script writes raw GitHub and Buildkite events into the `pending_events` table and emits a `cluster_ready` notification. The coordinator sub-agent reads those pending rows, clusters them via LLM reasoning, and dispatches workers only when the file sets touched by each cluster are disjoint. The coordinator owns all writes to `seen_events` — workers and the poll script never touch that table directly.
+
+Workers return strict JSON to the coordinator and do not write to the state database themselves. This keeps the write path single-threaded per cluster and avoids any need for worker-side locking.
 
 ## Start Mode — Detection
 
@@ -101,7 +191,7 @@ Store the result (e.g., `owner/repo-name`) as **REPO**.
 
 **Check `bk` CLI is available:** Run `which bk`. If it fails, tell the user: "The `bk` CLI is required for build monitoring but not found on your PATH. Install it or use `--no-builds` to skip build monitoring." Then stop.
 
-1. **Check for saved pipeline:** Read `${CLAUDE_PLUGIN_DATA}/babysit/pipelines.json` if it exists. Parse it as a JSON object mapping `owner/repo` to pipeline slug. If an entry exists for the current **REPO**, use that slug as **PIPELINE**. Skip to Branch Divergence Check.
+1. **Check for saved pipeline:** Read the saved pipeline slug for the current **REPO** from `${CLAUDE_PLUGIN_DATA}/babysit/state.db` if it exists. If an entry exists for the current **REPO**, use that slug as **PIPELINE**. Skip to Branch Divergence Check.
 
 2. **Detect pipeline:** If no saved pipeline was found, run:
    ```
@@ -120,7 +210,7 @@ Store the result (e.g., `owner/repo-name`) as **REPO**.
      ```
      Then stop and wait for the user's response.
 
-4. **Save pipeline:** Save the selected pipeline to `${CLAUDE_PLUGIN_DATA}/babysit/pipelines.json`. The file is a JSON object mapping `owner/repo` to slug. If the file already exists, merge the new entry into the existing object. If it does not exist, create it with the single entry.
+4. **Save pipeline:** Save the selected pipeline to `${CLAUDE_PLUGIN_DATA}/babysit/state.db`, keyed by `owner/repo`. If an entry already exists for the current **REPO**, replace it; otherwise insert a new entry.
 
 ### Branch Divergence Check
 
@@ -144,10 +234,11 @@ Continue regardless — this is a warning only, not a blocker.
 Run:
 
 ```
-mkdir -p ${CLAUDE_PLUGIN_DATA}/babysit
+mkdir -p "${CLAUDE_PLUGIN_DATA}/babysit"
+sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" < "${CLAUDE_SKILL_DIR}/assets/schema.sql"
 ```
 
-This ensures the state directory exists for the polling script to write to.
+This ensures the state directory exists and bootstraps the SQLite schema at `${CLAUDE_PLUGIN_DATA}/babysit/state.db` for the polling script and sub-agents to read and write.
 
 ## Start Mode — Launch Monitor
 
@@ -172,44 +263,22 @@ Examples:
 
 ## Start Mode — Dispatch Instructions
 
-When a `<task-notification>` arrives from the monitor, parse each line of the notification body as a JSON object. Each JSON object has a `type` field.
+When a `<task-notification>` arrives from the monitor, parse each line of the notification body as a JSON object. Each JSON object has a `type` field. Handle each line according to its type:
 
-### Lock acquisition
+### Event type: `"cluster_ready"`
 
-Before dispatching any sub-agents for a notification, acquire a lockfile to suppress polling during processing:
+The polling script emits this event when pending events have been queued and are ready for clustering and dispatch. The coordinator sub-agent owns clustering, atomic claims, file-disjoint wave packing, worker dispatch, and all state-database writes.
 
-```
-touch ${CLAUDE_PLUGIN_DATA}/babysit/poll-$$.lock
-```
-
-This lock wraps the entire notification batch — acquire it once before handling any events from the notification.
-
-Handle each event according to its type:
-
-### Event type: `"comment_thread"`
-
-1. Read the file `${CLAUDE_SKILL_DIR}/assets/comment-check-prompt.md`.
+1. Read the file `${CLAUDE_SKILL_DIR}/assets/coordinator-prompt.md`.
 2. In its contents, replace:
    - `<REPO>` with the detected **REPO** value
    - `<PR_NUMBER>` with the detected **PR_NUMBER** value
    - `<BRANCH_NAME>` with the detected **BRANCH_NAME** value
-   - `<EVENT_JSON>` with the full JSON line from the notification (this is a thread event containing the full thread context and new comment IDs)
+   - `<PIPELINE>` with the detected **PIPELINE** value (or `"None"` if `--no-builds` was specified)
    - `<FREEFORM_INSTRUCTIONS>` with the stored freeform instructions string (or `"None"` if none were provided)
-3. Pass the fully interpolated prompt to the **Agent** tool with description `"thread-check PR #<PR_NUMBER>"` (with actual PR number).
-4. Print the sub-agent's returned summary.
-
-### Event type: `"build_failure"`
-
-1. Read the file `${CLAUDE_SKILL_DIR}/assets/build-check-prompt.md`.
-2. In its contents, replace:
-   - `<REPO>` with the detected **REPO** value
-   - `<PR_NUMBER>` with the detected **PR_NUMBER** value
-   - `<BRANCH_NAME>` with the detected **BRANCH_NAME** value
-   - `<PIPELINE>` with the detected **PIPELINE** value
-   - `<EVENT_JSON>` with the full JSON line from the notification
-   - `<FREEFORM_INSTRUCTIONS>` with the stored freeform instructions string (or `"None"` if none were provided)
-3. Pass the fully interpolated prompt to the **Agent** tool with description `"build-check PR #<PR_NUMBER>"` (with actual PR number).
-4. Print the sub-agent's returned summary.
+   - `<EVENT_COUNT>` with the `event_count` field from the JSON line (the number of pending events queued for this PR)
+3. Pass the fully interpolated prompt to the **Agent** tool with description `"coordinator PR #<PR_NUMBER>"` (with actual PR number).
+4. Print the coordinator's returned summary.
 
 ### Event type: `"error"`
 
@@ -217,17 +286,7 @@ Print a warning message: "Polling degraded: <message>. Will retry next cycle." (
 
 ### Multiple events in one notification
 
-If a single notification contains multiple JSON lines, dispatch a **separate sub-agent** for each `"comment_thread"` or `"build_failure"` event — one agent per thread, not per comment. Error events are handled inline (print warning only). All sub-agent dispatches for a single notification may be launched in parallel.
-
-### Lock release
-
-After all sub-agents for a notification have returned (or if there were only error events and no agents were dispatched), release the lockfile:
-
-```
-rm -f ${CLAUDE_PLUGIN_DATA}/babysit/poll-$$.lock
-```
-
-This ensures the lock is held for the entire notification batch and released only once all processing is complete.
+If a single notification contains multiple JSON lines, handle each line according to its type. Multiple `cluster_ready` lines for the same PR are rare but possible; each one spawns its own coordinator invocation. Error lines are handled inline (print warning only).
 
 ## Confirmation Message
 
