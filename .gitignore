@@ -3,3 +3,7 @@ skills/babysit/data/
 skills/plan/data/plans/
 .claude/
 .DS_Store
+
+# Python bytecode caches (from running pytest)
+__pycache__/
+*.pyc

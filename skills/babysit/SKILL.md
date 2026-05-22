@@ -57,19 +57,22 @@ Then stop — do not continue to Start mode.
 
 If the remaining text is `clean` (case-insensitive):
 
+Clean mode delegates all DB writes to `db.py` (the CLI at `${CLAUDE_SKILL_DIR}/assets/db.py`). The `--dry-run` flag skips every destructive call — read-only queries still run so the dry-run summary is accurate. Ensure `BABYSIT_STATE_DB` is set or pass `--db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"` to each call (the examples below pass `--db` explicitly).
+
 If `--dry-run` was specified, print a banner first:
 
 ```
 === DRY RUN — no changes will be written ===
 ```
 
-1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, print: "No babysit state found." Then stop.
+1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, print: "No babysit state found." Then stop. (`db.py` opens its own connection per call — there is no separate connect step.)
 
-2. **Collect tracked PRs:** Connect to the database via `sqlite3` and run:
+2. **Collect tracked PRs:** Ask the CLI for every PR ever recorded in `seen_events`:
    ```
-   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "SELECT DISTINCT pr FROM seen_events;"
+   python3 "${CLAUDE_SKILL_DIR}/assets/db.py" list_distinct_prs \
+       --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"
    ```
-   This yields the set of PR numbers tracked across all events. If the result is empty, print: "No babysit state found." Then stop.
+   The CLI prints one JSON object on stdout of the shape `{"ok": true, "prs": [<pr>, ...]}`. Extract the PR numbers with `jq -r '.prs[]'`. If the array is empty, print: "No babysit state found." Then stop.
 
 3. **Check each PR's GitHub state:** For each unique PR number, run:
    ```
@@ -90,43 +93,38 @@ If `--dry-run` was specified, print a banner first:
      ```
      Would purge PR #<PR_NUMBER> (<state>): rows from seen_events, worker_reports, clusters, pending_events
      ```
-   - If `--dry-run` was NOT specified, execute the deletion in a single transaction. Bind `<PR_NUMBER>` to the `?` placeholders:
+   - If `--dry-run` was specified, **skip the CLI call** — the line above is the only output for this PR.
+   - If `--dry-run` was NOT specified, delegate the transactional 4-table purge to `db.py`:
      ```
-     sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" <<SQL
-     BEGIN;
-     DELETE FROM seen_events WHERE pr=<PR_NUMBER>;
-     DELETE FROM worker_reports WHERE cluster_id IN (SELECT cluster_id FROM clusters WHERE pr=<PR_NUMBER>);
-     DELETE FROM clusters WHERE pr=<PR_NUMBER>;
-     DELETE FROM pending_events WHERE pr=<PR_NUMBER>;
-     COMMIT;
-     SQL
+     python3 "${CLAUDE_SKILL_DIR}/assets/db.py" purge_pr \
+         --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db" \
+         --pr <PR_NUMBER>
      ```
-     Then report: "Purged PR #<PR_NUMBER> (<state>)."
+     The CLI runs all four `DELETE`s in a single transaction and prints `{"ok": true, "counts": {...}}`. Then report: "Purged PR #<PR_NUMBER> (<state>)."
    - For preserved PRs, report: "Preserved PR #<PR_NUMBER> (still open)."
 
-5. **Stale-cluster reap:** Filesystem lockfiles are gone — abandoned cluster rows in the database are the new safety net for crashed coordinators/workers. Run:
-   ```
-   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "SELECT cluster_id, pr FROM clusters WHERE status='running';"
-   ```
-   For each running cluster, cross-check against the live agent task list using the `TaskList` tool. A cluster is considered **live** if any running task's description matches one of:
-   - `coordinator PR #<pr>` (where `<pr>` is the cluster's `pr` column)
-   - any description beginning with `worker ` (worker tasks are tied to clusters via `cluster_id` in the DB, so any live worker task is treated as evidence that some cluster work is in flight)
+5. **Stale-cluster reap:** Filesystem lockfiles are gone — abandoned cluster rows in the database are the new safety net for crashed coordinators/workers. Use the `TaskList` tool to enumerate live agent tasks, then build the list of live `cluster_id` values to preserve. A cluster is considered **live** if any running task's description matches one of:
+   - `coordinator PR #<pr>` (any coordinator task implies its cluster is in flight — include the corresponding cluster_id)
+   - any description beginning with `worker ` (worker tasks are tied to clusters via `cluster_id` in the DB; include each live worker's cluster_id)
 
-   If no live task matches for a given running cluster, mark it as a stale-cluster candidate. Print the intended reap, e.g.:
-   ```
-   Would mark cluster <cluster_id> (PR #<pr>) as abandoned — no live coordinator/worker task
-   ```
-   If `--dry-run` was NOT specified, run:
-   ```
-   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "UPDATE clusters SET status='abandoned' WHERE cluster_id='<cluster_id>';"
-   ```
-   Then report: "Reaped stale cluster <cluster_id> (PR #<pr>) — marked abandoned."
+   Collect those cluster_ids into a JSON array (e.g. `["c1","c2"]`) and store it as `$live_ids_json`. If no live tasks are running, use `[]`.
 
-6. **Vacuum:** If `--dry-run` was NOT specified, reclaim space:
+   Print the intended reaps for any running cluster that is *not* in the live whitelist (the CLI will compute this set authoritatively, but for the dry-run banner you may pre-print "Would mark cluster <cluster_id> (PR #<pr>) as abandoned — no live coordinator/worker task" lines based on a separate read of `clusters WHERE status='running'`).
+
+   If `--dry-run` was specified, **skip the CLI call**.
+
+   If `--dry-run` was NOT specified, pipe the live cluster_ids to the CLI to perform the cross-PR sweep in one shot:
    ```
-   sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "VACUUM;"
+   printf '%s' "$live_ids_json" | python3 "${CLAUDE_SKILL_DIR}/assets/db.py" reap_stale_clusters \
+       --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"
    ```
-   Skip this step entirely in dry-run mode.
+   Omit `--pr` for a cross-PR sweep (the CLI scopes to all PRs when `--pr` is absent). The CLI prints `{"ok": true, "reaped": N}`. Then report: "Reaped N stale cluster(s) — marked abandoned."
+
+6. **Vacuum:** If `--dry-run` was specified, **skip this step entirely**. Otherwise reclaim space:
+   ```
+   python3 "${CLAUDE_SKILL_DIR}/assets/db.py" vacuum \
+       --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"
+   ```
 
 7. **Print summary:** Print a final summary block. If `--dry-run` was specified, prefix the summary with the dry-run banner repeated:
    ```
