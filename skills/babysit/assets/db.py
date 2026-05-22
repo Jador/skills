@@ -23,3 +23,13 @@ def insert_pending_event(
     )
     conn.commit()
     return cur.rowcount
+
+
+def read_pending_events(conn: sqlite3.Connection, pr: int) -> list[dict]:
+    """Return pending_events rows for one PR, oldest first."""
+    cur = conn.execute(
+        "SELECT pr, kind, event_id, payload, received_ts "
+        "FROM pending_events WHERE pr = ? ORDER BY received_ts ASC",
+        (pr,),
+    )
+    return [dict(row) for row in cur.fetchall()]
