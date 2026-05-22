@@ -144,6 +144,31 @@ def purge_pr(conn: sqlite3.Connection, pr: int) -> dict:
     return counts
 
 
+def reap_stale_clusters(
+    conn: sqlite3.Connection,
+    pr: int | None = None,
+    live_cluster_ids: list[str] | None = None,
+) -> int:
+    """Mark running clusters as abandoned. Returns reap count.
+
+    pr=None scopes to all PRs (used by Clean mode).
+    live_cluster_ids is a whitelist of cluster_ids to preserve.
+    """
+    where = ["status = 'running'"]
+    params: list = []
+    if pr is not None:
+        where.append("pr = ?")
+        params.append(pr)
+    if live_cluster_ids:
+        placeholders = ",".join("?" * len(live_cluster_ids))
+        where.append(f"cluster_id NOT IN ({placeholders})")
+        params.extend(live_cluster_ids)
+    sql = "UPDATE clusters SET status='abandoned' WHERE " + " AND ".join(where)
+    with conn:
+        cur = conn.execute(sql, params)
+    return cur.rowcount
+
+
 def list_distinct_prs(conn: sqlite3.Connection) -> list[int]:
     """Distinct PR numbers ever recorded in seen_events, sorted asc."""
     cur = conn.execute("SELECT DISTINCT pr FROM seen_events ORDER BY pr ASC")
