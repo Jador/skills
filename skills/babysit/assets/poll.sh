@@ -111,10 +111,20 @@ db_query() {
   sqlite3 -noheader "$STATE_DB"
 }
 
-# Escape a string for safe inclusion in a single-quoted SQL literal.
-sql_escape() {
-  local s="$1"
-  printf "%s" "${s//\'/\'\'}"
+# Render a string as a SQL TEXT expression via CAST(x'<hex>' AS TEXT).
+# SQLite TEXT literals do NOT honour backslash escapes — a body like
+# `I\'m` survives single-quote doubling and breaks the SQL tokeniser
+# (the literal closes at `I\` and `m'` is then unexpected). Hex-encoding
+# bypasses all shell+SQL quoting. Empty input renders as '' since x''
+# is a zero-length blob.
+sql_text() {
+  local hex
+  hex=$(printf "%s" "$1" | od -An -tx1 -v | tr -d ' \n')
+  if [[ -z "$hex" ]]; then
+    printf "''"
+  else
+    printf "CAST(x'%s' AS TEXT)" "$hex"
+  fi
 }
 
 # Insert one pending event row. Args: kind, event_id, payload_json.
@@ -127,13 +137,14 @@ insert_pending_event() {
   local now
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-  local kind_esc event_id_esc payload_esc
-  kind_esc=$(sql_escape "$kind")
-  event_id_esc=$(sql_escape "$event_id")
-  payload_esc=$(sql_escape "$payload")
+  local kind_sql event_id_sql payload_sql now_sql
+  kind_sql=$(sql_text "$kind")
+  event_id_sql=$(sql_text "$event_id")
+  payload_sql=$(sql_text "$payload")
+  now_sql=$(sql_text "$now")
 
-  printf "INSERT OR IGNORE INTO pending_events (pr, kind, event_id, payload, received_ts) VALUES (%s, '%s', '%s', '%s', '%s');\n" \
-    "$PR" "$kind_esc" "$event_id_esc" "$payload_esc" "$now" \
+  printf "INSERT OR IGNORE INTO pending_events (pr, kind, event_id, payload, received_ts) VALUES (%s, %s, %s, %s, %s);\n" \
+    "$PR" "$kind_sql" "$event_id_sql" "$payload_sql" "$now_sql" \
     | db_exec
 }
 
