@@ -119,3 +119,26 @@ def commit_worker_report(
             )
             pending_deleted += cur.rowcount
     return {"seen_inserted": seen_inserted, "pending_deleted": pending_deleted}
+
+
+def purge_pr(conn: sqlite3.Connection, pr: int) -> dict:
+    """Delete every trace of one PR. Single transaction across 4 tables.
+
+    Returns per-table delete counts.
+    """
+    counts = {}
+    with conn:
+        # Delete worker_reports first via clusters join (clusters has the pr column)
+        cur = conn.execute(
+            "DELETE FROM worker_reports "
+            "WHERE cluster_id IN (SELECT cluster_id FROM clusters WHERE pr = ?)",
+            (pr,),
+        )
+        counts["worker_reports"] = cur.rowcount
+        cur = conn.execute("DELETE FROM clusters WHERE pr = ?", (pr,))
+        counts["clusters"] = cur.rowcount
+        cur = conn.execute("DELETE FROM seen_events WHERE pr = ?", (pr,))
+        counts["seen_events"] = cur.rowcount
+        cur = conn.execute("DELETE FROM pending_events WHERE pr = ?", (pr,))
+        counts["pending_events"] = cur.rowcount
+    return counts
