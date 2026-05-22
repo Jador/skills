@@ -63,3 +63,59 @@ def claim_cluster(
             (cluster_id,),
         )
     return cur.rowcount == 1
+
+
+def commit_worker_report(
+    conn: sqlite3.Connection,
+    cluster_id: str,
+    pr: int,
+    resolved_event_ids: list[dict],
+    unresolved_event_ids: list[dict],
+    files_touched: list[str],
+    commit_sha: str,
+    summary: str,
+    now_ts: str,
+) -> dict:
+    """Atomically persist a worker's result.
+
+    Inside one transaction:
+      - INSERT OR IGNORE every resolved tuple into seen_events.
+      - INSERT a worker_reports row (raises on duplicate cluster_id).
+      - UPDATE clusters.status='done', clusters.files_touched=JSON.
+      - DELETE matching (pr, kind, event_id) from pending_events.
+
+    Returns {"seen_inserted": N, "pending_deleted": M}.
+    """
+    seen_inserted = 0
+    pending_deleted = 0
+    files_json = json.dumps(files_touched)
+    resolved_json = json.dumps(resolved_event_ids)
+    unresolved_json = json.dumps(unresolved_event_ids)
+    with conn:
+        for ev in resolved_event_ids:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO seen_events (pr, kind, event_id, ts) "
+                "VALUES (?, ?, ?, ?)",
+                (pr, ev["kind"], ev["event_id"], now_ts),
+            )
+            seen_inserted += cur.rowcount
+        conn.execute(
+            "INSERT INTO worker_reports "
+            "(cluster_id, resolved_ids, unresolved_ids, files_touched, "
+            "commit_sha, summary, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (cluster_id, resolved_json, unresolved_json, files_json,
+             commit_sha, summary, now_ts),
+        )
+        conn.execute(
+            "UPDATE clusters SET status='done', files_touched=? "
+            "WHERE cluster_id = ?",
+            (files_json, cluster_id),
+        )
+        for ev in resolved_event_ids:
+            cur = conn.execute(
+                "DELETE FROM pending_events "
+                "WHERE pr = ? AND kind = ? AND event_id = ?",
+                (pr, ev["kind"], ev["event_id"]),
+            )
+            pending_deleted += cur.rowcount
+    return {"seen_inserted": seen_inserted, "pending_deleted": pending_deleted}
