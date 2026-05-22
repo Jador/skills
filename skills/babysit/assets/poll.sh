@@ -85,7 +85,9 @@ fi
 
 STATE_DIR="${CLAUDE_PLUGIN_DATA}/babysit"
 STATE_DB="${STATE_DIR}/state.db"
-SCHEMA_FILE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/schema.sql"
+ASSETS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCHEMA_FILE="${ASSETS_DIR}/schema.sql"
+DB_PY="${ASSETS_DIR}/db.py"
 
 mkdir -p "$STATE_DIR"
 
@@ -100,52 +102,14 @@ fi
 ###############################################################################
 # sqlite helpers
 ###############################################################################
-
-# Run a SQL statement against state.db. Stdin = SQL.
-db_exec() {
-  sqlite3 "$STATE_DB"
-}
+#
+# All writes go through python3 db.py (bound parameters). Inline reads via
+# sqlite3 are only used for queries that take integer PR values and string
+# literals — never untrusted text — so they cannot be SQL-injected.
 
 # Run a SQL query and print result. Stdin = SQL.
 db_query() {
   sqlite3 -noheader "$STATE_DB"
-}
-
-# Render a string as a SQL TEXT expression via CAST(x'<hex>' AS TEXT).
-# SQLite TEXT literals do NOT honour backslash escapes — a body like
-# `I\'m` survives single-quote doubling and breaks the SQL tokeniser
-# (the literal closes at `I\` and `m'` is then unexpected). Hex-encoding
-# bypasses all shell+SQL quoting. Empty input renders as '' since x''
-# is a zero-length blob.
-sql_text() {
-  local hex
-  hex=$(printf "%s" "$1" | od -An -tx1 -v | tr -d ' \n')
-  if [[ -z "$hex" ]]; then
-    printf "''"
-  else
-    printf "CAST(x'%s' AS TEXT)" "$hex"
-  fi
-}
-
-# Insert one pending event row. Args: kind, event_id, payload_json.
-# event_id should be unique per (pr, kind). Payload is the raw JSON.
-# INSERT OR IGNORE collapses duplicates on the primary key.
-insert_pending_event() {
-  local kind="$1"
-  local event_id="$2"
-  local payload="$3"
-  local now
-  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-  local kind_sql event_id_sql payload_sql now_sql
-  kind_sql=$(sql_text "$kind")
-  event_id_sql=$(sql_text "$event_id")
-  payload_sql=$(sql_text "$payload")
-  now_sql=$(sql_text "$now")
-
-  printf "INSERT OR IGNORE INTO pending_events (pr, kind, event_id, payload, received_ts) VALUES (%s, %s, %s, %s, %s);\n" \
-    "$PR" "$kind_sql" "$event_id_sql" "$payload_sql" "$now_sql" \
-    | db_exec
 }
 
 ###############################################################################
@@ -221,13 +185,24 @@ SQL
     }
   ' 2>/dev/null) || return 0
 
-  # Insert each event into pending_events.
+  # Insert each event into pending_events via the db.py CLI. The CLI
+  # uses bound parameters so payloads with any characters (quotes,
+  # backslashes, embedded JSON) are stored verbatim. --json-stdin reads
+  # the raw payload from stdin and validates it parses as JSON.
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   while IFS= read -r evt; do
     [[ -z "$evt" ]] && continue
     local root_id
     root_id=$(echo "$evt" | jq -r '.thread_root_id')
     [[ -z "$root_id" || "$root_id" == "null" ]] && continue
-    insert_pending_event "comment_thread" "$root_id" "$evt"
+    printf '%s' "$evt" | python3 "$DB_PY" insert_pending \
+      --db "$STATE_DB" \
+      --pr "$PR" \
+      --kind "comment_thread" \
+      --event-id "$root_id" \
+      --received-ts "$now" \
+      --json-stdin >/dev/null
   done <<< "$events"
 }
 
@@ -266,12 +241,21 @@ poll_builds() {
     }
   ' 2>/dev/null) || return 0
 
+  # Insert each event into pending_events via the db.py CLI.
+  local now
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   while IFS= read -r evt; do
     [[ -z "$evt" ]] && continue
     local build_num
     build_num=$(echo "$evt" | jq -r '.build_number')
     [[ -z "$build_num" || "$build_num" == "null" ]] && continue
-    insert_pending_event "build_failure" "$build_num" "$evt"
+    printf '%s' "$evt" | python3 "$DB_PY" insert_pending \
+      --db "$STATE_DB" \
+      --pr "$PR" \
+      --kind "build_failure" \
+      --event-id "$build_num" \
+      --received-ts "$now" \
+      --json-stdin >/dev/null
   done <<< "$events"
 }
 
