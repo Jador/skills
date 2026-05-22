@@ -179,3 +179,194 @@ def vacuum(conn: sqlite3.Connection) -> None:
     """Reclaim space. VACUUM cannot run inside a transaction."""
     conn.commit()  # Close any open transaction
     conn.execute("VACUUM")
+
+
+# ---------------------------------------------------------------------------
+# CLI dispatcher
+# ---------------------------------------------------------------------------
+
+def _emit(obj: dict) -> None:
+    """Print one JSON object on a single line to stdout."""
+    import sys as _sys
+    _sys.stdout.write(json.dumps(obj) + "\n")
+    _sys.stdout.flush()
+
+
+def _build_parser():
+    import argparse
+    p = argparse.ArgumentParser(prog="db.py", description="babysit DB CLI")
+    # --db can appear before OR after the subcommand. Both top-level and
+    # per-subparser register the same flag with a shared dest.
+    p.add_argument("--db", default=None, help="sqlite DB file path")
+
+    def _add_db(parser):
+        parser.add_argument("--db", default=None, dest="db",
+                            help="sqlite DB file path")
+
+    sub = p.add_subparsers(dest="op", required=True)
+
+    sp = sub.add_parser("insert_pending")
+    _add_db(sp)
+    sp.add_argument("--pr", type=int, required=True)
+    sp.add_argument("--kind", required=True)
+    sp.add_argument("--event-id", required=True)
+    sp.add_argument("--received-ts", required=True)
+    sp.add_argument("--payload", default=None)
+    sp.add_argument("--json-stdin", action="store_true")
+
+    sp = sub.add_parser("read_pending")
+    _add_db(sp)
+    sp.add_argument("--pr", type=int, required=True)
+
+    sp = sub.add_parser("claim_cluster")
+    _add_db(sp)
+    sp.add_argument("--cluster-id", required=True)
+    sp.add_argument("--pr", type=int, required=True)
+    sp.add_argument("--created-ts", required=True)
+    sp.add_argument("--predicted-files", default=None,
+                    help="JSON list of predicted file paths")
+    sp.add_argument("--json-stdin", action="store_true")
+
+    sp = sub.add_parser("commit_worker_report")
+    _add_db(sp)
+    sp.add_argument("--cluster-id", required=True)
+    sp.add_argument("--pr", type=int, required=True)
+    sp.add_argument("--commit-sha", required=True)
+    sp.add_argument("--summary", required=True)
+    sp.add_argument("--now-ts", required=True)
+    # stdin JSON is implicit for this op; no flag needed.
+
+    sp = sub.add_parser("purge_pr")
+    _add_db(sp)
+    sp.add_argument("--pr", type=int, required=True)
+
+    sp = sub.add_parser("list_distinct_prs")
+    _add_db(sp)
+
+    sp = sub.add_parser("reap_stale_clusters")
+    _add_db(sp)
+    sp.add_argument("--pr", type=int, default=None)
+    # Optional live cluster ids via stdin (JSON list).
+
+    sp = sub.add_parser("vacuum")
+    _add_db(sp)
+
+    return p
+
+
+def _dispatch(args, conn):
+    """Route parsed args to the underlying op and return a result dict."""
+    import sys as _sys
+    op = args.op
+
+    if op == "insert_pending":
+        if args.json_stdin:
+            payload = _sys.stdin.read()
+            # Validate it's parseable JSON; we store the raw text.
+            json.loads(payload)
+        else:
+            payload = args.payload if args.payload is not None else ""
+        n = insert_pending_event(
+            conn,
+            pr=args.pr,
+            kind=args.kind,
+            event_id=args.event_id,
+            payload=payload,
+            received_ts=args.received_ts,
+        )
+        return {"ok": True, "rows_affected": n}
+
+    if op == "read_pending":
+        rows = read_pending_events(conn, pr=args.pr)
+        return {"ok": True, "rows": rows}
+
+    if op == "claim_cluster":
+        if args.json_stdin:
+            predicted = json.loads(_sys.stdin.read())
+        elif args.predicted_files is not None:
+            predicted = json.loads(args.predicted_files)
+        else:
+            predicted = []
+        claimed = claim_cluster(
+            conn,
+            cluster_id=args.cluster_id,
+            pr=args.pr,
+            predicted_files=predicted,
+            created_ts=args.created_ts,
+        )
+        return {"ok": True, "claimed": bool(claimed)}
+
+    if op == "commit_worker_report":
+        body = _sys.stdin.read()
+        parsed = json.loads(body)
+        result = commit_worker_report(
+            conn,
+            cluster_id=args.cluster_id,
+            pr=args.pr,
+            resolved_event_ids=parsed.get("resolved_event_ids", []),
+            unresolved_event_ids=parsed.get("unresolved_event_ids", []),
+            files_touched=parsed.get("files_touched", []),
+            commit_sha=args.commit_sha,
+            summary=args.summary,
+            now_ts=args.now_ts,
+        )
+        return {
+            "ok": True,
+            "seen_inserted": result["seen_inserted"],
+            "pending_deleted": result["pending_deleted"],
+        }
+
+    if op == "purge_pr":
+        counts = purge_pr(conn, pr=args.pr)
+        return {"ok": True, "counts": counts}
+
+    if op == "list_distinct_prs":
+        prs = list_distinct_prs(conn)
+        return {"ok": True, "prs": prs}
+
+    if op == "reap_stale_clusters":
+        # Optional list of live cluster ids on stdin (JSON array). If
+        # stdin is a tty or empty, treat as no whitelist.
+        live = None
+        if not _sys.stdin.isatty():
+            raw = _sys.stdin.read()
+            if raw.strip():
+                live = json.loads(raw)
+        n = reap_stale_clusters(conn, pr=args.pr, live_cluster_ids=live)
+        return {"ok": True, "reaped": n}
+
+    if op == "vacuum":
+        vacuum(conn)
+        return {"ok": True}
+
+    raise ValueError(f"unknown op: {op}")
+
+
+def main(argv=None) -> int:
+    """CLI entrypoint. Returns process exit code."""
+    import os
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    db_path = args.db or os.environ.get("BABYSIT_STATE_DB")
+    if not db_path:
+        _emit({"ok": False, "error": "DB path not provided"})
+        return 1
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        try:
+            result = _dispatch(args, conn)
+        except Exception as e:
+            _emit({"ok": False, "error": str(e), "exit_code": 2})
+            return 2
+        _emit(result)
+        return 0
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
