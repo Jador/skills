@@ -142,3 +142,15 @@ def purge_pr(conn: sqlite3.Connection, pr: int) -> dict:
         cur = conn.execute("DELETE FROM pending_events WHERE pr = ?", (pr,))
         counts["pending_events"] = cur.rowcount
     return counts
+
+
+def list_distinct_prs(conn: sqlite3.Connection) -> list[int]:
+    """Distinct PR numbers ever recorded in seen_events, sorted asc."""
+    cur = conn.execute("SELECT DISTINCT pr FROM seen_events ORDER BY pr ASC")
+    return [row["pr"] if hasattr(row, "keys") else row[0] for row in cur.fetchall()]
+
+
+def vacuum(conn: sqlite3.Connection) -> None:
+    """Reclaim space. VACUUM cannot run inside a transaction."""
+    conn.commit()  # Close any open transaction
+    conn.execute("VACUUM")
