@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime
 
 
 def compute_cluster_id(pr: int, event_ids: list[tuple[str, str]]) -> str:
@@ -25,6 +26,84 @@ def compute_cluster_id(pr: int, event_ids: list[tuple[str, str]]) -> str:
         h.update(eid.encode("utf-8"))
         h.update(b";")
     return h.hexdigest()[:16]  # 16 hex chars = 64-bit collision resistance, plenty
+
+
+def _event_files(event: dict) -> list[str]:
+    """Extract file list from an event's payload JSON.
+
+    Permissive: accepts ``file`` (string) or ``files`` (list of strings).
+    Returns ``[]`` for missing / unparseable payloads — such events can
+    still cluster via the kind-window rule.
+    """
+    try:
+        payload = json.loads(event.get("payload") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(payload, dict):
+        if isinstance(payload.get("file"), str):
+            return [payload["file"]]
+        if isinstance(payload.get("files"), list):
+            return [f for f in payload["files"] if isinstance(f, str)]
+    return []
+
+
+def _parse_ts(ts: str) -> float:
+    """Parse ISO 8601 UTC to Unix epoch seconds. Tolerates trailing 'Z'."""
+    if ts.endswith("Z"):
+        ts = ts[:-1] + "+00:00"
+    return datetime.fromisoformat(ts).timestamp()
+
+
+def mechanical_precluster(
+    events: list[dict],
+    window_seconds: int = 30,
+) -> list[list[dict]]:
+    """Group events by file-overlap + same-kind-within-window into clusters.
+
+    Two events end up in the same cluster if EITHER:
+      - their ``predicted_files`` (parsed from payload JSON) overlap, OR
+      - they share ``kind`` AND their ``received_ts`` values differ by
+        no more than ``window_seconds`` seconds.
+
+    Grouping is transitive (union-find): A↔B and B↔C implies A,B,C in one
+    cluster. Single-event clusters are valid output. Returns ``[]`` for
+    empty input.
+    """
+    if not events:
+        return []
+    n = len(events)
+    # Union-Find for transitive grouping.
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    files = [set(_event_files(e)) for e in events]
+    times = [_parse_ts(e["received_ts"]) for e in events]
+    kinds = [e["kind"] for e in events]
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            file_overlap = bool(files[i] & files[j])
+            kind_window = (
+                kinds[i] == kinds[j]
+                and abs(times[i] - times[j]) <= window_seconds
+            )
+            if file_overlap or kind_window:
+                union(i, j)
+
+    clusters: dict[int, list[dict]] = {}
+    for i, e in enumerate(events):
+        clusters.setdefault(find(i), []).append(e)
+    return list(clusters.values())
 
 
 def insert_pending_event(
@@ -276,6 +355,11 @@ def _build_parser():
     sp.add_argument("--json-stdin", action="store_true",
                     help="Read {\"event_ids\":[{\"kind\":...,\"event_id\":...}]} from stdin")
 
+    sp = sub.add_parser("precluster_events")
+    _add_db(sp)
+    sp.add_argument("--pr", type=int, required=True)
+    sp.add_argument("--window-seconds", type=int, default=30)
+
     return p
 
 
@@ -374,6 +458,11 @@ def _dispatch(args, conn):
         ]
         cid = compute_cluster_id(pr=args.pr, event_ids=tuples)
         return {"ok": True, "cluster_id": cid}
+
+    if op == "precluster_events":
+        rows = read_pending_events(conn, pr=args.pr)
+        clusters = mechanical_precluster(rows, window_seconds=args.window_seconds)
+        return {"ok": True, "clusters": clusters}
 
     raise ValueError(f"unknown op: {op}")
 
