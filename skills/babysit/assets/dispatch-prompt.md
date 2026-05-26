@@ -112,9 +112,9 @@ claim_result=$(printf '%s' "${predicted_files_json}" \
 Parse `claim_result` with `jq`:
 
 - If `.ok == true && .claimed == true` — **we won**. Proceed to wave packing for this cluster.
-- Otherwise — **skip silently**. Either another dispatcher (rare under Guard 1, but defensive) already claimed it, OR a prior completed dispatcher already processed this exact event set. Because cluster_id is deterministic (Guard 2), the same event set produces the same hash, so concurrent dispatchers collide at `claim_cluster`'s atomic UPDATE rather than claiming distinct ids for the same logical work.
+- Otherwise — **skip silently**. Another dispatcher (rare under Guard 1, but defensive) is concurrently claiming the same cluster_id; the atomic UPDATE inside `db.py claim_cluster` picked the other one.
 
-> **Atomicity note:** atomicity comes from Python sqlite3's `with conn:` implicit transaction in `db.py claim_cluster` — INSERT OR IGNORE + UPDATE WHERE status='pending' run as one transaction, and `cursor.rowcount==1` is the single-winner oracle. Never re-check the DB; trust the `.claimed` boolean.
+> **Atomicity note:** atomicity comes from Python sqlite3's `with conn:` implicit transaction in `db.py claim_cluster` — INSERT OR IGNORE + UPDATE WHERE status IN ('pending', 'abandoned', 'done') run as one transaction, and `cursor.rowcount==1` is the single-winner oracle. The widened filter intentionally allows re-claim of `abandoned` rows (recovery after a prior dispatcher crashed mid-cluster) and `done` rows (recovery when the same event re-enters `pending_events`, e.g. a still-failing build). The widened-filter re-claim resets `created_ts` and `files_touched` so wave packing sees fresh state. Never re-check the DB; trust the `.claimed` boolean.
 
 ## Step 5: Build Dispatch Waves
 
@@ -189,7 +189,7 @@ Each worker returns prose followed by a fenced JSON block. **Workers occasionall
 - `commit_sha` is the short SHA of the worker's commit, or empty string if no commit was made (e.g., DISAGREE / ESCALATE outcomes).
 - `summary` is a one-line human-readable result.
 
-If JSON parsing fails for a worker, log the failure (include `<DISPATCHER_PID>` in the log filename), mark that cluster `abandoned`, and continue with the others. Do not retry parsing — workers occasionally drift from the JSON contract, and the LAST-fenced-block grep is the only fallback.
+If JSON parsing fails for a worker, log the failure (include `<DISPATCHER_PID>` in the log filename) and continue with the other workers in the wave. Leave the cluster row at `status='running'` — there is no `mark_cluster_abandoned` op, and Important Rule #2 forbids raw `UPDATE` statements. Clean mode's cross-PR sweep (Guard 3) will mark the lingering row `abandoned` when it next runs. The deterministic `cluster_id` plus the widened `claim_cluster` filter mean a future dispatcher with the same event set can re-claim and retry. Do not attempt to retry JSON parsing — workers occasionally drift from the JSON contract, and the LAST-fenced-block grep is the only fallback.
 
 ## Step 8: Transactional Commit per Worker
 
@@ -225,7 +225,7 @@ The CLI emits `{"ok": true, "seen_inserted": N, "pending_deleted": M}`. Parse wi
 Important details:
 
 - If the worker's `commit_sha` is empty, still call `commit_worker_report` — empty SHA is a valid signal that the worker chose to reply or escalate without changing code.
-- If the CLI returns `{"ok": false, ...}` (transaction failed), mark the cluster `abandoned` and continue with the other workers in the wave. There's no dedicated `mark_abandoned` op; Clean mode's cross-PR reap will catch any lingering `running` rows (Guard 3).
+- If the CLI returns `{"ok": false, ...}` (transaction failed), leave the cluster row at `status='running'`, log the failure (include `<DISPATCHER_PID>`), and continue with the other workers in the wave. There is no `mark_cluster_abandoned` op, and Important Rule #2 forbids raw `UPDATE` statements. Clean mode's cross-PR sweep (Guard 3) will mark the lingering row `abandoned` when it next runs; a future dispatcher with the same event set will then re-claim it via the widened `claim_cluster` filter and the worker re-runs.
 
 ## Step 9: Return Aggregated Summary
 

@@ -82,6 +82,11 @@ if [[ -z "$PR" || -z "$BRANCH" ]]; then
   exit 1
 fi
 
+# Sanitize "owner/repo" → "owner__repo" for safe inclusion in filesystem
+# artifact names. PR numbers are not unique across repos, so every per-PR
+# path (lockdir, pid file, log file) must also be scoped by repo.
+REPO_SAFE="${REPO//\//__}"
+
 ###############################################################################
 # State directory and database
 ###############################################################################
@@ -110,6 +115,13 @@ DISPATCH_PROMPT_FILE="${ASSETS_DIR}/dispatch-prompt.md"
 FREEFORM="${FREEFORM_INSTRUCTIONS:-None}"
 
 mkdir -p "$STATE_DIR"
+
+# Self-record poller PID under a repo+PR-scoped name so Stop mode can find
+# and terminate this process. The file holds our real numeric $$ — never a
+# harness shell-id — so `kill -TERM` always works. Cleared on exit.
+POLLER_PID_FILE="${STATE_DIR}/babysit-pid-${REPO_SAFE}-${PR}.pid"
+echo "$$" > "$POLLER_PID_FILE"
+trap 'rm -f "$POLLER_PID_FILE"' EXIT
 
 # Ensure schema is applied. Idempotent: schema.sql uses CREATE IF NOT EXISTS.
 if [[ -f "$SCHEMA_FILE" ]]; then
@@ -346,38 +358,48 @@ SQL
   prompt="${prompt//<DISPATCHER_PID>/$$}"
 
   # Log file for the dispatcher's output — useful for crash diagnosis.
+  # Scoped by repo+PR so cross-repo runs do not stomp on each other.
   local log_file
-  log_file="${STATE_DIR}/dispatch-${PR}-$(date -u +%s).log"
+  log_file="${STATE_DIR}/dispatch-${REPO_SAFE}-${PR}-$(date -u +%s).log"
 
   # Spawn dispatcher as a background `claude -p` headless session. Export
   # the two env vars the dispatcher prompt expects (BABYSIT_STATE_DB and
   # CLAUDE_SKILL_DIR) into its environment. Dispatcher inherits cwd from
   # poll.sh (the repo root, set when the user started babysit).
+  #
+  # `--add-dir` is required: a headless `claude -p` session restricts
+  # tool access to its cwd, but the dispatcher must Read worker prompts
+  # from ${CLAUDE_SKILL_DIR}/assets/ and the SQLite DB under
+  # ${CLAUDE_PLUGIN_DATA}/babysit/ — both outside the user's repo.
+  # `--max-budget-usd` caps spend per dispatch since each burst is a
+  # fresh session with no inherited limits.
   BABYSIT_STATE_DB="$STATE_DB" \
   CLAUDE_SKILL_DIR="$CLAUDE_SKILL_DIR" \
   claude -p \
     --permission-mode acceptEdits \
     --output-format json \
+    --max-budget-usd 50 \
+    --add-dir "${CLAUDE_SKILL_DIR}" \
+    --add-dir "${CLAUDE_PLUGIN_DATA}" \
     "$prompt" \
     > "$log_file" 2>&1 &
   local dispatcher_pid=$!
 
-  # Record the dispatcher pid inside the lockdir so the stale-lock check
-  # in acquire_dispatch_lock can detect a crashed dispatcher on the next
-  # burst.
+  # Atomically rewrite the placeholder PID written by acquire_dispatch_lock
+  # with the real dispatcher pid so stale-lock checks (and `/babysit stop
+  # --force`) see the correct process.
   write_dispatch_lock_pid "$PR" "$dispatcher_pid"
 
   # Background watcher: when the dispatcher exits, release the lock. Use a
   # disowned subshell so it survives poll.sh exit and does not block the
-  # main poll loop. Note: `wait` only works on direct children of the
-  # calling shell, and the dispatcher is a child of poll.sh (not of this
-  # subshell), so we poll `ps` instead. 2s cadence is cheap and the
-  # dispatcher's runtime dwarfs the poll interval.
+  # main poll loop. Pass the expected pid to release_dispatch_lock so the
+  # watcher cannot clobber a lockdir that has been re-acquired by a
+  # different dispatcher in the meantime.
   (
-    while ps -p "$dispatcher_pid" > /dev/null 2>&1; do
+    while _dispatcher_alive "$dispatcher_pid"; do
       sleep 2
     done
-    release_dispatch_lock "$PR"
+    release_dispatch_lock "$PR" "$dispatcher_pid"
   ) &
   disown
 }
@@ -393,9 +415,26 @@ SQL
 
 # Per-PR dispatch lock — Guard 1 for A2 dispatch architecture.
 # Returns 0 if lock acquired (caller proceeds), 1 if another dispatcher live.
-# Atomic via mkdir.
+# Atomic via mkdir; stale recovery via atomic rename.
+#
+# Lockdir name includes the sanitized repo segment so two repos can run
+# babysit on a PR with the same number without colliding.
 DISPATCH_LOCK_DIR() {
-  printf '%s/babysit/dispatch-lock-%s.d' "${CLAUDE_PLUGIN_DATA}" "$1"
+  printf '%s/babysit/dispatch-lock-%s-%s.d' "${CLAUDE_PLUGIN_DATA}" "$REPO_SAFE" "$1"
+}
+
+# Liveness probe with PID-reuse defense — true iff $pid exists AND its
+# command name still looks like a claude process. Plain `ps -p $pid`
+# trusts PID identity, which the kernel may have recycled to an unrelated
+# long-lived process while the dispatcher was dying.
+_dispatcher_alive() {
+  local pid="$1"
+  [[ -n "$pid" ]] || return 1
+  ps -p "$pid" > /dev/null 2>&1 || return 1
+  local comm
+  comm="$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')"
+  [[ "$comm" == *claude* ]] || return 1
+  return 0
 }
 
 acquire_dispatch_lock() {
@@ -403,27 +442,54 @@ acquire_dispatch_lock() {
   local lockdir
   lockdir="$(DISPATCH_LOCK_DIR "$pr")"
 
-  # Stale lock check: if lockdir exists but the pid inside isn't a live process, clear it.
-  if [[ -d "$lockdir" ]]; then
+  # Stale-lock recovery loop. We cannot simply `rm -rf` + `mkdir` because
+  # two concurrent callers can both observe the same stale pid and race
+  # each other through the `mkdir`. Instead, atomically rename the stale
+  # lockdir aside with `mv -n` (POSIX rename is atomic; `-n` prevents
+  # clobber on race). Exactly one rename wins; losers see the lockdir
+  # already gone and loop back to retry `mkdir`.
+  while [[ -d "$lockdir" ]]; do
     local pid
     pid="$(cat "${lockdir}/pid" 2>/dev/null || echo '')"
-    if [[ -n "$pid" ]] && ! ps -p "$pid" > /dev/null 2>&1; then
-      # Stale lock — prior dispatcher died without releasing.
-      echo "[poll] stale dispatch lock for PR ${pr} (pid ${pid} not alive); clearing" >&2
-      rm -rf "$lockdir"
+    if [[ -z "$pid" ]] || _dispatcher_alive "$pid"; then
+      # Empty pid file means acquisition is in progress in another shell;
+      # do NOT clear it — that would defeat the lock. Treat as loser.
+      return 1
     fi
-  fi
+    local stale="${lockdir}.stale.$$.$(date -u +%s)"
+    if mv -n "$lockdir" "$stale" 2>/dev/null; then
+      echo "[poll] stale dispatch lock for PR ${pr} (pid ${pid} not a live claude proc); reaping" >&2
+      rm -rf "$stale"
+    fi
+  done
 
   if mkdir "$lockdir" 2>/dev/null; then
+    # Write a placeholder pid (our own $$) immediately so any concurrent
+    # `acquire_dispatch_lock` sees a non-empty file and treats us as live.
+    # `maybe_spawn_dispatcher` overwrites this atomically once the real
+    # dispatcher pid is known via `write_dispatch_lock_pid`.
+    printf '%s\n' "$$" > "${lockdir}/pid"
     return 0
   fi
   return 1
 }
 
 release_dispatch_lock() {
+  # Ownership-checked release. If the lockdir's pid no longer matches the
+  # caller's expected dispatcher pid, another dispatcher has acquired the
+  # lock since the caller's watcher started — do not remove it.
   local pr="$1"
+  local expected_pid="${2:-}"
   local lockdir
   lockdir="$(DISPATCH_LOCK_DIR "$pr")"
+  if [[ -n "$expected_pid" ]]; then
+    local pid
+    pid="$(cat "${lockdir}/pid" 2>/dev/null || echo '')"
+    if [[ "$pid" != "$expected_pid" ]]; then
+      echo "[poll] release_dispatch_lock PR ${pr}: pid mismatch (have='${pid}', expected='${expected_pid}'); leaving lock alone" >&2
+      return 0
+    fi
+  fi
   rm -rf "$lockdir"
 }
 
@@ -432,7 +498,12 @@ write_dispatch_lock_pid() {
   local pid="$2"
   local lockdir
   lockdir="$(DISPATCH_LOCK_DIR "$pr")"
-  printf '%s\n' "$pid" > "${lockdir}/pid"
+  # Atomic overwrite via rename. Reader (`/babysit stop --force`, watcher
+  # ownership check) either sees the old placeholder or the new value,
+  # never a truncated file.
+  local tmp="${lockdir}/pid.tmp.$$"
+  printf '%s\n' "$pid" > "$tmp"
+  mv -f "$tmp" "${lockdir}/pid"
 }
 
 ###############################################################################

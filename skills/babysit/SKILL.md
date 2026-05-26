@@ -50,32 +50,35 @@ The `--force` flag is only meaningful for Stop mode. If `--force` is supplied al
 
 Single SQLite DB at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. All writes atomic via `db.py` (Python sqlite3 with `?` bound params and `with conn:` transactions). No filesystem locks for DB state.
 
-The poll script (`assets/poll.sh`) runs as a background Task per monitored PR. On each cycle it ingests new comments + build failures into `pending_events`. After a 30s debounce window of no new events for a PR, the poller spawns a fresh headless `claude -p` dispatcher (acquiring a per-PR `mkdir`-based lock — Guard 1). The dispatcher reads pending events, runs an LLM clustering pass, atomically claims clusters via `db.py claim_cluster` with deterministic cluster_id (Guard 2), spawns sub-agent workers via the `Agent` tool, collects their JSON returns, and commits `worker_reports` + drains `pending_events`. Workers stay sub-agents because `claude -p` main thread → `Agent` tool sub-agent is one level of nesting only (validated).
+The poll script (`assets/poll.sh`) runs as a background process per monitored PR (launched via the Bash tool's `run_in_background: true` parameter — a backgrounded shell, **not** a `TaskCreate` Task; the harness's `TaskList` cannot see it). On each cycle it ingests new comments + build failures into `pending_events`. After a 30s debounce window of no new events for a PR, the poller spawns a fresh headless `claude -p` dispatcher (acquiring a per-`(repo,PR)` `mkdir`-based lock — Guard 1). The dispatcher reads pending events, runs an LLM clustering pass, atomically claims clusters via `db.py claim_cluster` with deterministic cluster_id (Guard 2), spawns sub-agent workers via the `Agent` tool, collects their JSON returns, and commits `worker_reports` + drains `pending_events`. Workers stay sub-agents because `claude -p` main thread → `Agent` tool sub-agent is one level of nesting only (validated).
 
 Workers return strict JSON — they do NOT write state. The dispatcher is the sole DB writer for `seen_events`, `clusters`, and `worker_reports`.
 
-**This means your session is not involved in dispatch.** Start mode launches `poll.sh` and exits. To observe what the background pipeline is doing, `tail -f ${CLAUDE_PLUGIN_DATA}/babysit/dispatch-<PR>-*.log`.
+**This means your session is not involved in dispatch.** Start mode launches `poll.sh` and exits. To observe what the background pipeline is doing, `tail -f ${CLAUDE_PLUGIN_DATA}/babysit/dispatch-<REPO_SAFE>-<PR>-*.log` (where `<REPO_SAFE>` is the current `owner/repo` with `/` replaced by `__`).
 
 ### Mode: Stop
 
 If the remaining text is `stop` (case-insensitive):
 
+PID files and lockdirs are scoped by both repository and PR number. The convention is `babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid` and `dispatch-lock-<REPO_SAFE>-<PR_NUMBER>.d`, where `<REPO_SAFE>` is `owner/repo` with every `/` replaced by `__`. This lets babysit run concurrently against PRs with the same number across different repositories.
+
 1. **Locate poller PID file(s):**
-   - If a PR number was discovered (see PR Detection below — Stop mode does the same auto-detect as Start mode), look at `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<PR_NUMBER>.pid`.
-   - If no PR can be detected from the current branch (e.g., the user ran `babysit stop` from outside a repo), scan `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file and operate on each in turn.
+   - If a repo + PR pair was discovered (see PR Detection below — Stop mode does the same auto-detect as Start mode), look at `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`.
+   - If neither a repo nor a PR can be detected (e.g., the user ran `babysit stop` from outside a repo), scan `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file and operate on each in turn.
    - If no PID files exist at all, print: "No babysit pollers are currently running." Then stop.
 
 2. **Terminate the poller(s):** For each PID file:
-   - Read the PID with `cat`.
+   - Read the PID with `cat`. The contents are written by `poll.sh` itself as its first action (using its own numeric `$$`), so this is always a real process id — never a harness shell-id — and `kill -TERM` will always succeed against a live poller.
    - `kill -TERM <pid>` (ignore errors — the process may already have exited).
-   - Remove the PID file.
+   - Remove the PID file. (`poll.sh` also removes it on graceful exit; the explicit `rm` here covers the SIGTERM case.)
 
 3. **Default behaviour leaves in-flight dispatchers alone.** Active dispatcher processes continue to completion — they are independent of `poll.sh` and may be mid-work writing `worker_reports`. Killing them mid-cluster can leave `clusters.status='running'` rows behind that Clean mode will eventually reap.
 
-4. **`--force` mode also terminates dispatchers:** If `--force` was specified, for each affected PR:
-   - Read the dispatcher PID from `${CLAUDE_PLUGIN_DATA}/babysit/dispatch-lock-<PR>.d/pid` if it exists.
-   - `kill -TERM <pid>` (ignore errors).
-   - Remove the lockdir with `rm -rf "${CLAUDE_PLUGIN_DATA}/babysit/dispatch-lock-<PR>.d"`.
+4. **`--force` mode also terminates dispatchers:** If `--force` was specified, for each affected `(REPO_SAFE, PR)` pair:
+   - Read the dispatcher PID from `${CLAUDE_PLUGIN_DATA}/babysit/dispatch-lock-<REPO_SAFE>-<PR>.d/pid` if it exists.
+   - If the pid file is missing or its contents are non-numeric (e.g., a placeholder written by `acquire_dispatch_lock` in the brief window before the real dispatcher pid is recorded), **skip the kill and leave the lockdir alone** — removing it would let a second dispatcher spawn against the same `(repo, PR)` on the next debounce.
+   - Otherwise, `kill -TERM <pid>` (ignore errors).
+   - Remove the lockdir with `rm -rf "${CLAUDE_PLUGIN_DATA}/babysit/dispatch-lock-<REPO_SAFE>-<PR>.d"`.
 
 5. **Print confirmation:**
    - Without `--force`: "Stopped N babysit poller(s). In-flight dispatchers (if any) will continue to completion."
@@ -133,13 +136,41 @@ If `--dry-run` was specified, print a banner first:
      The CLI runs all four `DELETE`s in a single transaction and prints `{"ok": true, "counts": {...}}`. Then report: "Purged PR #<PR_NUMBER> (<state>)."
    - For preserved PRs, report: "Preserved PR #<PR_NUMBER> (still open)."
 
-5. **Stale-cluster reap (cross-PR safety net):** Under A2, abandoned `clusters.status='running'` rows arise only when a dispatcher crashes mid-claim — the per-burst dispatch model means there is no per-PR reap step in the dispatcher itself. Clean mode keeps a cross-PR sweep as the safety net:
+5. **Stale-cluster reap (cross-PR safety net):** Under A2, abandoned `clusters.status='running'` rows arise only when a dispatcher crashes mid-claim — the per-burst dispatch model means there is no per-PR reap step in the dispatcher itself. Clean mode keeps a cross-PR sweep as the safety net.
 
-   Use the `TaskList` tool to enumerate live agent tasks, then build the list of live `cluster_id` values to preserve. A cluster is considered **live** if any running task's description begins with `worker ` (worker tasks are tied to clusters via `cluster_id` in the DB; include each live worker's cluster_id).
+   **Live-cluster enumeration (NOT TaskList).** Workers run inside the dispatcher's headless `claude -p` session, not your user session — `TaskList` cannot see them and would always return an empty whitelist, causing this step to abandon every running cluster across every PR. Derive liveness from the dispatch lockdirs instead. Run this snippet:
 
-   Collect those cluster_ids into a JSON array (e.g. `["c1","c2"]`) and store it as `$live_ids_json`. If no live tasks are running, use `[]`.
+   ```bash
+   live_ids=()
+   shopt -s nullglob
+   for lockdir in "${CLAUDE_PLUGIN_DATA}/babysit/"dispatch-lock-*.d; do
+     pid_file="${lockdir}/pid"
+     [[ -f "$pid_file" ]] || continue
+     pid=$(cat "$pid_file" 2>/dev/null || true)
+     [[ "$pid" =~ ^[0-9]+$ ]] || continue
+     ps -p "$pid" >/dev/null 2>&1 || continue
+     comm=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d '[:space:]')
+     [[ "$comm" == *claude* ]] || continue
+     # Lockdir name: dispatch-lock-<REPO_SAFE>-<PR>.d. Pull trailing -<num>.
+     base=$(basename "$lockdir" .d)
+     pr="${base##*-}"
+     [[ "$pr" =~ ^[0-9]+$ ]] || continue
+     while IFS= read -r cid; do
+       [[ -n "$cid" ]] && live_ids+=("$cid")
+     done < <(sqlite3 -noheader "${CLAUDE_PLUGIN_DATA}/babysit/state.db" \
+       "SELECT cluster_id FROM clusters WHERE pr = $pr AND status = 'running';" 2>/dev/null)
+   done
+   shopt -u nullglob
+   if [[ ${#live_ids[@]} -eq 0 ]]; then
+     live_ids_json="[]"
+   else
+     live_ids_json=$(printf '%s\n' "${live_ids[@]}" | jq -Rsn '[inputs|select(length>0)]')
+   fi
+   ```
 
-   Print the intended reaps for any running cluster that is *not* in the live whitelist (the CLI computes the authoritative set, but for the dry-run banner you may pre-print "Would mark cluster <cluster_id> (PR #<pr>) as abandoned — no live worker task" lines based on a separate read of `clusters WHERE status='running'`).
+   `$live_ids_json` is the JSON array to pipe into `reap_stale_clusters`. Note that an empty array (`[]`) here genuinely means "no live dispatchers found" — `db.py` will then mark every `clusters.status='running'` row as `abandoned`. That is the intended safety-net behaviour: if no dispatcher process is alive, no cluster can legitimately still be running. If the lockdir scan failed to discover dispatchers you expected, abort Clean mode and investigate before re-running.
+
+   Print the intended reaps for any running cluster that is *not* in the live whitelist (for the dry-run banner, pre-print "Would mark cluster <cluster_id> (PR #<pr>) as abandoned — no live dispatcher" lines based on a separate read of `clusters WHERE status='running'` that filters out the whitelist).
 
    If `--dry-run` was specified, **skip the CLI call**.
 
@@ -163,7 +194,7 @@ If `--dry-run` was specified, print a banner first:
    - Otherwise the lockdir is stale. Print: "Would remove stale dispatch lockdir <path> (pid <pid> not alive, mtime > 1h)."
    - If `--dry-run` was NOT specified, `rm -rf "<lockdir>"`.
 
-8. **Sweep old dispatcher logs:** List `${CLAUDE_PLUGIN_DATA}/babysit/dispatch-*-*.log` files older than 30 days (use `find "${CLAUDE_PLUGIN_DATA}/babysit" -maxdepth 1 -type f -name 'dispatch-*-*.log' -mtime +30`). For each match:
+8. **Sweep old dispatcher logs:** List `${CLAUDE_PLUGIN_DATA}/babysit/dispatch-*.log` files older than 30 days (use `find "${CLAUDE_PLUGIN_DATA}/babysit" -maxdepth 1 -type f -name 'dispatch-*.log' -mtime +30`). For each match:
    - Print: "Would remove old dispatcher log <path>."
    - If `--dry-run` was NOT specified, `rm -f <path>`.
 
@@ -306,34 +337,28 @@ Examples:
 - Comments disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SKILL_DIR="${CLAUDE_SKILL_DIR}" FREEFORM_INSTRUCTIONS='None' bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 120 --no-comments`
 - Builds disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SKILL_DIR="${CLAUDE_SKILL_DIR}" FREEFORM_INSTRUCTIONS='None' bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" --interval 120 --no-builds`
 
-### Record the poller PID
+### Poller PID file
 
-Immediately after the Bash tool returns the background task's PID, write it to a PID file so Stop mode can find and terminate the poller:
+You do **not** need to record the poller's PID from the Bash tool's return value. The Bash tool's `run_in_background: true` mode often returns a harness shell-id (e.g. `bash_abc123`) rather than a real OS PID, and `kill -TERM` cannot signal a shell-id. To avoid that failure mode, `poll.sh` writes its own numeric `$$` to `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid` as its first action and clears the file on graceful exit. Stop mode reads that file directly.
 
-```
-echo "<POLLER_PID>" > "${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<PR_NUMBER>.pid"
-```
-
-Replace `<POLLER_PID>` with the actual PID returned by the Bash tool (the shell PID of the backgrounded `poll.sh`) and `<PR_NUMBER>` with the detected PR number.
-
-If the PID is not available from the Bash tool's return (e.g., the tool only reports a shell-id), record the shell-id instead — Stop mode reads whatever this file contains and passes it to `kill -TERM`.
+`<REPO_SAFE>` is `owner/repo` with each `/` replaced by `__` (e.g. `myorg/myrepo` → `myorg__myrepo`). The same scoping is used for the dispatch lockdir and dispatcher logs so multiple repos with PRs of the same number can run concurrently without colliding.
 
 ## Confirmation Message
 
-After the poller is launched and the PID file is written, print the following confirmation message (replacing placeholders with actual values):
+After the poller is launched, print the following confirmation message (replacing placeholders with actual values). Note that the PID file is self-recorded by `poll.sh`, so you do not need to capture or print the PID itself.
 
 ```
 PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
 - Monitoring:       every 2 minutes
 - Review comments:  enabled/disabled
 - Build status:     enabled/disabled (pipeline: <PIPELINE>)
-- Poller PID:       <POLLER_PID> (written to ${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<PR_NUMBER>.pid)
+- PID file:         ${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid (self-recorded by poll.sh)
 
 Babysit no longer dispatches workers from your session. The background
 poller spawns its own headless `claude -p` dispatchers on debounce. To
 follow what is happening live:
 
-    tail -f "${CLAUDE_PLUGIN_DATA}/babysit/dispatch-<PR_NUMBER>-"*.log
+    tail -f "${CLAUDE_PLUGIN_DATA}/babysit/dispatch-<REPO_SAFE>-<PR_NUMBER>-"*.log
 
 To stop the poller: `/babysit stop` (active dispatchers continue to
 completion) or `/babysit stop --force` (also kills in-flight dispatchers).

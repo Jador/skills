@@ -144,8 +144,17 @@ def claim_cluster(
     """Atomic single-winner cluster claim.
 
     Two-step: INSERT OR IGNORE the cluster row with status='pending', then
-    UPDATE to 'running' only if it is still 'pending'. The UPDATE's
-    rowcount is the single-winner oracle (==1 means we won the race).
+    UPDATE to 'running'. The UPDATE matches rows in {'pending', 'abandoned',
+    'done'} so that:
+      - First-time claims succeed via the freshly-inserted 'pending' row.
+      - Recovery claims (prior dispatcher crashed → 'abandoned' by Clean
+        mode) succeed and re-run the worker.
+      - Re-entry claims (event re-arrived in pending_events after prior
+        resolution, e.g. a still-failing build) succeed and re-run the
+        worker — bounded by the dispatcher's per-cluster retry-cap logic.
+
+    The cursor's rowcount is the single-winner oracle (==1 means we won
+    the race; concurrent dispatchers collide here).
     """
     files_json = json.dumps(predicted_files)
     with conn:
@@ -156,9 +165,11 @@ def claim_cluster(
             (cluster_id, pr, created_ts, files_json),
         )
         cur = conn.execute(
-            "UPDATE clusters SET status='running' "
-            "WHERE cluster_id = ? AND status = 'pending'",
-            (cluster_id,),
+            "UPDATE clusters SET status='running', created_ts=?, "
+            "files_touched=? "
+            "WHERE cluster_id = ? "
+            "AND status IN ('pending', 'abandoned', 'done')",
+            (created_ts, files_json, cluster_id),
         )
     return cur.rowcount == 1
 
@@ -197,8 +208,11 @@ def commit_worker_report(
                 (pr, ev["kind"], ev["event_id"], now_ts),
             )
             seen_inserted += cur.rowcount
+        # INSERT OR REPLACE so a re-claim of a previously-done cluster
+        # (event re-entered pending_events; cluster_id is deterministic)
+        # overwrites the prior worker outcome rather than UNIQUE-failing.
         conn.execute(
-            "INSERT INTO worker_reports "
+            "INSERT OR REPLACE INTO worker_reports "
             "(cluster_id, resolved_ids, unresolved_ids, files_touched, "
             "commit_sha, summary, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (cluster_id, resolved_json, unresolved_json, files_json,
