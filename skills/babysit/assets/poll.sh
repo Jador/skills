@@ -295,6 +295,59 @@ SQL
 }
 
 ###############################################################################
+# Per-PR dispatch lock helpers (Guard 1 for A2 dispatch architecture).
+#
+# Used by Task 5 dispatcher spawn. Lock is per-PR — cross-PR concurrency
+# is desired. Atomicity is provided by mkdir, which is POSIX-atomic on both
+# macOS and Linux: two concurrent mkdir calls for the same path result in
+# exactly one success and one failure.
+###############################################################################
+
+# Per-PR dispatch lock — Guard 1 for A2 dispatch architecture.
+# Returns 0 if lock acquired (caller proceeds), 1 if another dispatcher live.
+# Atomic via mkdir.
+DISPATCH_LOCK_DIR() {
+  printf '%s/babysit/dispatch-lock-%s.d' "${CLAUDE_PLUGIN_DATA}" "$1"
+}
+
+acquire_dispatch_lock() {
+  local pr="$1"
+  local lockdir
+  lockdir="$(DISPATCH_LOCK_DIR "$pr")"
+
+  # Stale lock check: if lockdir exists but the pid inside isn't a live process, clear it.
+  if [[ -d "$lockdir" ]]; then
+    local pid
+    pid="$(cat "${lockdir}/pid" 2>/dev/null || echo '')"
+    if [[ -n "$pid" ]] && ! ps -p "$pid" > /dev/null 2>&1; then
+      # Stale lock — prior dispatcher died without releasing.
+      echo "[poll] stale dispatch lock for PR ${pr} (pid ${pid} not alive); clearing" >&2
+      rm -rf "$lockdir"
+    fi
+  fi
+
+  if mkdir "$lockdir" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+release_dispatch_lock() {
+  local pr="$1"
+  local lockdir
+  lockdir="$(DISPATCH_LOCK_DIR "$pr")"
+  rm -rf "$lockdir"
+}
+
+write_dispatch_lock_pid() {
+  local pr="$1"
+  local pid="$2"
+  local lockdir
+  lockdir="$(DISPATCH_LOCK_DIR "$pr")"
+  printf '%s\n' "$pid" > "${lockdir}/pid"
+}
+
+###############################################################################
 # Main loop
 ###############################################################################
 
