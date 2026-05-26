@@ -4,8 +4,27 @@ All operations take an open sqlite3.Connection. The CLI in __main__ (added
 later) wraps these for shell callers.
 """
 from __future__ import annotations
+import hashlib
 import json
 import sqlite3
+
+
+def compute_cluster_id(pr: int, event_ids: list[tuple[str, str]]) -> str:
+    """Deterministic cluster_id from (pr, sorted (kind, event_id) tuples).
+
+    Stable across invocations and insertion orders. Used as Guard 2 against
+    concurrent-dispatcher claim races.
+    """
+    canonical = sorted(event_ids)
+    h = hashlib.sha256()
+    h.update(str(pr).encode("utf-8"))
+    h.update(b"|")
+    for kind, eid in canonical:
+        h.update(kind.encode("utf-8"))
+        h.update(b":")
+        h.update(eid.encode("utf-8"))
+        h.update(b";")
+    return h.hexdigest()[:16]  # 16 hex chars = 64-bit collision resistance, plenty
 
 
 def insert_pending_event(
@@ -251,6 +270,12 @@ def _build_parser():
     sp = sub.add_parser("vacuum")
     _add_db(sp)
 
+    sp = sub.add_parser("compute_cluster_id")
+    _add_db(sp)
+    sp.add_argument("--pr", type=int, required=True)
+    sp.add_argument("--json-stdin", action="store_true",
+                    help="Read {\"event_ids\":[{\"kind\":...,\"event_id\":...}]} from stdin")
+
     return p
 
 
@@ -339,7 +364,21 @@ def _dispatch(args, conn):
         vacuum(conn)
         return {"ok": True}
 
+    if op == "compute_cluster_id":
+        if args.json_stdin:
+            parsed = json.loads(_sys.stdin.read())
+        else:
+            parsed = {"event_ids": []}
+        tuples = [
+            (ev["kind"], ev["event_id"]) for ev in parsed.get("event_ids", [])
+        ]
+        cid = compute_cluster_id(pr=args.pr, event_ids=tuples)
+        return {"ok": True, "cluster_id": cid}
+
     raise ValueError(f"unknown op: {op}")
+
+
+_NO_DB_OPS = {"compute_cluster_id"}
 
 
 def main(argv=None) -> int:
@@ -347,6 +386,16 @@ def main(argv=None) -> int:
     import os
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # Pure-function ops do not need a DB connection.
+    if args.op in _NO_DB_OPS:
+        try:
+            result = _dispatch(args, conn=None)
+        except Exception as e:
+            _emit({"ok": False, "error": str(e), "exit_code": 2})
+            return 2
+        _emit(result)
+        return 0
 
     db_path = args.db or os.environ.get("BABYSIT_STATE_DB")
     if not db_path:
