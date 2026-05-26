@@ -39,6 +39,12 @@ CREATE TABLE IF NOT EXISTS pending_events (
     PRIMARY KEY (pr, kind, event_id)
 );
 
+CREATE TABLE IF NOT EXISTS pipelines (
+    repo TEXT PRIMARY KEY,
+    slug TEXT NOT NULL,
+    ts TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_clusters_pr ON clusters (pr);
 CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters (status);
 CREATE INDEX IF NOT EXISTS idx_pending_events_pr ON pending_events (pr);
