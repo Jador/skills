@@ -116,12 +116,37 @@ FREEFORM="${FREEFORM_INSTRUCTIONS:-None}"
 
 mkdir -p "$STATE_DIR"
 
+###############################################################################
+# Self-log: tee stdout+stderr to a per-PR poll log for observability.
+#
+# poll.sh runs as a backgrounded shell when launched via `bash run_in_background`
+# — the harness captures output to an ephemeral task buffer that the user can't
+# tail. Without this, every cycle was invisible. Now: live progress at
+# ${STATE_DIR}/poll-${REPO_SAFE}-${PR}.log, follow with `tail -f`.
+#
+# Process substitution + exec is bash 3.2-compatible.
+###############################################################################
+POLL_LOG="${STATE_DIR}/poll-${REPO_SAFE}-${PR}.log"
+exec > >(tee -a "$POLL_LOG") 2>&1
+
+# Timestamped log line. Used throughout the poll loop for visibility.
+log() {
+  printf '[%s] [poll] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+}
+
+log "starting babysit poll loop"
+log "repo=$REPO pr=$PR branch=$BRANCH pipeline=${PIPELINE:-<none>}"
+log "interval=${INTERVAL}s debounce=${DEBOUNCE_SECONDS}s"
+log "state_db=$STATE_DB"
+log "poll_log=$POLL_LOG"
+log "dispatch_logs=${STATE_DIR}/dispatch-${REPO_SAFE}-${PR}-*.log (one per burst)"
+
 # Self-record poller PID under a repo+PR-scoped name so Stop mode can find
 # and terminate this process. The file holds our real numeric $$ — never a
 # harness shell-id — so `kill -TERM` always works. Cleared on exit.
 POLLER_PID_FILE="${STATE_DIR}/babysit-pid-${REPO_SAFE}-${PR}.pid"
 echo "$$" > "$POLLER_PID_FILE"
-trap 'rm -f "$POLLER_PID_FILE"' EXIT
+trap 'log "poll loop exiting"; rm -f "$POLLER_PID_FILE"' EXIT
 
 # Ensure schema is applied. Idempotent: schema.sql uses CREATE IF NOT EXISTS.
 if [[ -f "$SCHEMA_FILE" ]]; then
@@ -221,7 +246,7 @@ SQL
   # uses bound parameters so payloads with any characters (quotes,
   # backslashes, embedded JSON) are stored verbatim. --json-stdin reads
   # the raw payload from stdin and validates it parses as JSON.
-  local now
+  local now ingested=0
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   while IFS= read -r evt; do
     [[ -z "$evt" ]] && continue
@@ -235,7 +260,10 @@ SQL
       --event-id "$root_id" \
       --received-ts "$now" \
       --json-stdin >/dev/null
+    ingested=$((ingested + 1))
+    log "ingested comment_thread event_id=$root_id"
   done <<< "$events"
+  (( ingested > 0 )) && log "poll_comments: $ingested new comment thread(s) buffered"
 }
 
 ###############################################################################
@@ -274,7 +302,7 @@ poll_builds() {
   ' 2>/dev/null) || return 0
 
   # Insert each event into pending_events via the db.py CLI.
-  local now
+  local now ingested=0
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   while IFS= read -r evt; do
     [[ -z "$evt" ]] && continue
@@ -288,7 +316,10 @@ poll_builds() {
       --event-id "$build_num" \
       --received-ts "$now" \
       --json-stdin >/dev/null
+    ingested=$((ingested + 1))
+    log "ingested build_failure build=$build_num"
   done <<< "$events"
+  (( ingested > 0 )) && log "poll_builds: $ingested new build failure(s) buffered"
 }
 
 ###############################################################################
@@ -332,7 +363,10 @@ SQL
   [[ -z "$max_epoch" ]] && return 0
 
   age=$(( now_epoch - max_epoch ))
-  (( age > DEBOUNCE_SECONDS )) || return 0
+  if (( age <= DEBOUNCE_SECONDS )); then
+    log "debounce: $count pending event(s), oldest ${age}s ago (waiting for ${DEBOUNCE_SECONDS}s quiet window)"
+    return 0
+  fi
 
   # Debounce window elapsed and events are pending. Try to acquire the
   # per-PR dispatch lock (Guard 1). If another dispatcher is already live
@@ -340,8 +374,10 @@ SQL
   # pending_events and will be picked up by the current dispatcher's claim
   # pass, or by the next burst's dispatcher.
   if ! acquire_dispatch_lock "$PR"; then
+    log "dispatch skipped: another dispatcher live for PR $PR (single-flight Guard 1)"
     return 0
   fi
+  log "debounce elapsed (${age}s > ${DEBOUNCE_SECONDS}s) — claiming dispatch lock for PR $PR"
 
   # Interpolate the dispatch prompt with the current burst's context.
   # dispatch-prompt.md uses <PLACEHOLDER> style (angle brackets); bash
@@ -393,16 +429,25 @@ SQL
   # in 30s. Cause unconfirmed (argv limit math says we are well below
   # ARG_MAX=1MB on macOS; suspect special-character handling in claude's
   # CLI parser for large positional prompts). Stdin sidesteps it entirely.
+  #
+  # `--output-format stream-json --verbose` writes one JSON event per line
+  # incrementally — `tail -f` on the dispatcher log shows live progress
+  # (model turns, tool calls, tool results). Previously --output-format
+  # json only emitted the final envelope on exit, so dispatcher crashes
+  # left an empty log with no diagnostic info.
+  log "spawning dispatcher id=$dispatcher_id log=$log_file (events=$count)"
   printf '%s' "$prompt" | BABYSIT_STATE_DB="$STATE_DB" \
     CLAUDE_SKILL_DIR="$CLAUDE_SKILL_DIR" \
     claude -p \
       --permission-mode acceptEdits \
-      --output-format json \
+      --output-format stream-json \
+      --verbose \
       --max-budget-usd 50 \
       --add-dir "${CLAUDE_SKILL_DIR}" \
       --add-dir "${CLAUDE_PLUGIN_DATA}" \
       > "$log_file" 2>&1 &
   local dispatcher_pid=$!
+  log "dispatcher pid=$dispatcher_pid (tail -f $log_file for live progress)"
 
   # Atomically rewrite the placeholder PID written by acquire_dispatch_lock
   # with the real dispatcher pid so stale-lock checks (and `/babysit stop
@@ -415,10 +460,15 @@ SQL
   # watcher cannot clobber a lockdir that has been re-acquired by a
   # different dispatcher in the meantime.
   (
+    local started_at
+    started_at=$(date -u +%s)
     while _dispatcher_alive "$dispatcher_pid"; do
       sleep 2
     done
+    local elapsed
+    elapsed=$(( $(date -u +%s) - started_at ))
     release_dispatch_lock "$PR" "$dispatcher_pid"
+    log "dispatcher pid=$dispatcher_pid id=$dispatcher_id exited after ${elapsed}s (log_bytes=$(wc -c <"$log_file" 2>/dev/null || echo 0))"
   ) &
   disown
 }
@@ -542,9 +592,15 @@ write_dispatch_lock_pid() {
 # Main loop
 ###############################################################################
 
+CYCLE=0
 while true; do
+  CYCLE=$((CYCLE + 1))
+  log "cycle $CYCLE start"
   poll_comments
   poll_builds
   maybe_spawn_dispatcher
+  # Cheap status snapshot once per cycle.
+  pending_count=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM pending_events WHERE pr=$PR" 2>/dev/null || echo 0)
+  log "cycle $CYCLE end — pending=$pending_count sleep=${INTERVAL}s"
   sleep "$INTERVAL"
 done
