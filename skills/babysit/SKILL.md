@@ -7,7 +7,7 @@ disable-model-invocation: true
 
 # Babysit Skill
 
-You monitor an open PR for review comments and build failures, automatically addressing feedback and fixing broken builds. The skill launches a background polling script as a read-only observer that streams JSON events to its stdout; your session reads those events with the Monitor tool and spawns one sub-agent worker per event to handle it.
+You monitor an open PR for review comments and build failures, automatically addressing feedback and fixing broken builds. The skill launches a background polling script via the Monitor tool. The script is a read-only observer that emits one JSON event per line to stdout; Monitor delivers each line to your session as a notification, and you spawn one sub-agent worker per event to handle it.
 
 ## Prerequisites
 
@@ -21,13 +21,18 @@ Before doing anything, verify the environment:
 
 ### First-time setup after upgrade
 
-If you are upgrading from a pre-SQLite version of this skill, you must run the one-time migration script before first use:
+If you are upgrading from **any** prior version of this skill (the early filesystem-JSON version *or* the SQLite dispatcher version), you must run the one-time migration script before first use:
 
 ```
 bash "${CLAUDE_SKILL_DIR}/assets/migrate.sh"
 ```
 
-This converts any legacy filesystem-based state into the new SQLite database at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. The script is idempotent — it is safe to run again, but only needs to succeed once per machine. If you have never used this skill before, you can skip the migration; the schema bootstrap in Start mode will create a fresh database for you.
+The script does three things, each idempotent:
+- Imports any legacy per-PR JSON state files into the SQLite database at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`.
+- Drops obsolete dispatcher/clustering tables (`clusters`, `worker_reports`, `pending_events`) carried over from the previous SQLite schema.
+- Removes orphan dispatcher filesystem artifacts (`dispatch-*.log`, `dispatch-lock-*.d/`) that the current architecture never touches.
+
+It is safe to re-run, but only needs to succeed once per machine. If you have never used this skill before, you can skip the migration; the schema bootstrap in Start mode will create a fresh database for you.
 
 ## Argument Parsing
 
@@ -47,11 +52,11 @@ The `--dry-run` flag is only meaningful for Clean mode. If `--dry-run` is suppli
 
 Babysit is a hybrid observer + session pattern with three roles:
 
-1. **`assets/poll.sh` — read-only observer.** Runs as a background process per monitored PR (launched via the Bash tool's `run_in_background: true` parameter — a backgrounded shell, **not** a `TaskCreate` Task; the harness's `TaskList` cannot see it). On each cycle it polls GitHub for new review comments and Buildkite for failed builds, dedupes against the `seen_events` table, and emits one JSON event per unseen item to its stdout. It is the **single writer** to `seen_events`; nothing else touches that table. It holds no locks and spawns no workers.
+1. **`assets/poll.sh` — read-only observer.** Runs as a background process per monitored PR, launched via the Monitor tool with `persistent: true`. Monitor owns the process lifecycle and streams every stdout line to your session as a notification. On each cycle poll.sh polls GitHub for new review comments and Buildkite for failed builds, dedupes against the `seen_events` table, and emits one JSON event per unseen item to its stdout. Log lines (timestamped progress, errors) go to stderr — Monitor does not surface stderr as notifications, so the event stream stays clean. poll.sh is the **single writer** to `seen_events`; nothing else touches that table. It holds no locks and spawns no workers.
 
-2. **Your user session — event reader.** After Start mode launches `poll.sh`, you use the Monitor tool to stream stdout from the backgrounded shell. Each stdout line is one of these JSON event shapes:
-   - `{"type":"comment_thread","pr":...,"thread_root_id":...,"comments":[...],"file":...,"line":...,"diff_hunk":...}`
-   - `{"type":"build_failure","pr":...,"build_number":...,"state":"failed","pipeline":...,"branch":...,"jobs":[...]}`
+2. **Your user session — event reader.** Monitor delivers each stdout line from `poll.sh` to your session as a notification. Each line is one of these JSON event shapes:
+   - `{"type":"comment_thread","pr":...,"repo":...,"branch":...,"thread_root_id":...,"new_comment_ids":[...],"comments":[...],"file":...,"line":...,"diff_hunk":...}`
+   - `{"type":"build_failure","pr":...,"repo":...,"branch":...,"pipeline":...,"build_number":...,"state":"failed","jobs":[...]}`
    - `{"type":"error","kind":...,"pr":...,"message":...}`
 
    For each event, spawn one sub-agent via the `Agent` tool, using `assets/comment-check-prompt.md` for `comment_thread` events and `assets/build-check-prompt.md` for `build_failure` events. Surface `error` events to the user and continue. The sub-agents do the actual work (replying to comments, pushing build fixes).
@@ -68,11 +73,19 @@ There are no per-PR locks and no second long-running LLM process spawned by `pol
 
 If the remaining text is `stop` (case-insensitive):
 
-PID files are scoped by both repository and PR number. The convention is `babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`, where `<REPO_SAFE>` is `owner/repo` with every `/` replaced by `__`. This lets babysit run concurrently against PRs with the same number across different repositories.
+PID files are scoped by both repository and PR number. The convention is `babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`, where `<REPO_SAFE>` is `owner/repo` with every `/` replaced by `__`. This lets babysit run concurrently against PRs with the same number across different repositories — and lets Stop mode target a single (repo, PR) without disturbing other pollers.
 
-1. **Locate poller PID file(s):** Scan `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file. If no PID files exist, print: "No babysit pollers are currently running." Then stop.
+1. **Locate poller PID file(s):** Try to auto-detect the current (repo, PR) the same way Start mode does:
+   - Run `gh repo view --json nameWithOwner --jq .nameWithOwner` to get **REPO**.
+   - Run `gh pr view --json number --jq .number` to get **PR_NUMBER**.
 
-2. **Terminate the poller(s):** For each PID file:
+   If **both** commands succeed, compute `<REPO_SAFE>` (`owner/repo` with each `/` replaced by `__`) and target only `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`.
+
+   If **either** command fails (e.g., `/babysit stop` was run from outside a git repo, or the current branch has no PR), fall back to scanning `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file. Print a one-line notice before proceeding: "No PR detected — stopping all babysit pollers."
+
+   If no matching PID files exist (in either path), print: "No babysit pollers are currently running." Then stop.
+
+2. **Terminate the poller(s):** For each PID file located in step 1:
    - Read the PID with `cat`.
    - `kill -TERM <pid>` (ignore errors — the process may already have exited).
    - Remove the PID file.
@@ -263,15 +276,15 @@ This ensures the state directory exists and bootstraps the SQLite schema at `${C
 
 ## Start Mode — Launch Poller
 
-Launch `poll.sh` as a background process via the Bash tool's `run_in_background: true` parameter. The polling script runs detached as a read-only observer — it emits one JSON event per line to stdout for each unseen comment thread or build failure, and never spawns workers itself. Your session reads those stdout lines via the Monitor tool and dispatches one sub-agent worker per event.
+Launch `poll.sh` as a background process via the **Monitor** tool. Monitor owns the process lifecycle and streams each stdout line from `poll.sh` to your session as a notification. The polling script runs detached as a read-only observer — it emits one JSON event per line to stdout for each unseen comment thread or build failure, and never spawns workers itself. You react to each notification by dispatching one sub-agent worker per event.
 
-**Bash tool call:**
+**Monitor tool call:**
 
 - **command:** see construction rules below.
-- **run_in_background:** `true`
-- **description:** `babysit poll PR #<PR_NUMBER>` (with actual PR number)
+- **persistent:** `true` (session-length watch; Monitor's default 5-minute timeout is wrong for babysit).
+- **description:** `babysit poll PR #<PR_NUMBER>` (with actual PR number).
 
-**Capture the returned shell-id.** When the Bash tool returns, it gives you a `bash_xxxxxxxx` shell-id for the backgrounded process. Store this as **SHELL_ID** — you will pass it to the Monitor tool in the next step.
+You do **not** need to capture any handle. Monitor delivers events automatically as notifications; there is no shell-id to track. Stop mode terminates `poll.sh` via its own PID file (see below).
 
 **Command construction rules:**
 - Always include the env prefix: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SKILL_DIR="${CLAUDE_SKILL_DIR}"`. Do **not** pass any other environment variables — `poll.sh` reads only `CLAUDE_PLUGIN_DATA`, `CLAUDE_SKILL_DIR`, and its own positional arguments / flags.
@@ -288,27 +301,27 @@ Examples:
 
 ### Poller PID file
 
-You do **not** need to record the poller's PID from the Bash tool's return value. The Bash tool's `run_in_background: true` mode returns a harness shell-id (e.g. `bash_abc123`) rather than a real OS PID, and `kill -TERM` cannot signal a shell-id. The shell-id is what you pass to the Monitor tool below, but it is **not** what Stop mode kills. To avoid that mismatch, `poll.sh` writes its own numeric `$$` to `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid` as its first action and clears the file on graceful exit. Stop mode reads that file directly.
+`poll.sh` writes its own numeric `$$` to `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid` as its first action and clears the file on graceful exit. Stop mode reads that file directly to send `kill -TERM`.
 
 `<REPO_SAFE>` is `owner/repo` with each `/` replaced by `__` (e.g. `myorg/myrepo` → `myorg__myrepo`). The same scoping convention applies to any per-PR artifact so multiple repos with PRs of the same number can run concurrently without colliding.
 
 ## Confirmation Message
 
-Immediately after launching `poll.sh` (and before entering the Monitor loop in the next section), print exactly:
+Immediately after launching `poll.sh` (and before reacting to any events in the next section), print exactly:
 
 ```
 Babysitting PR #<PR_NUMBER>. Listening for events…
 ```
 
-Substitute `<PR_NUMBER>` with the detected PR number. Keep this line short — it is the only output the user expects before events start arriving. Do not print a multi-line status block, do not print the PID file path, do not print the shell-id.
+Substitute `<PR_NUMBER>` with the detected PR number. Keep this line short — it is the only output the user expects before events start arriving. Do not print a multi-line status block, do not print the PID file path.
 
-## Start Mode — Monitor Loop
+## Start Mode — Event Handling
 
-Once the confirmation line is printed, your session's job is to keep reading new stdout lines from the backgrounded `poll.sh` shell and turning each one into a sub-agent invocation. This loop continues for the lifetime of your session (or until the user issues `/babysit stop`).
+Once the confirmation line is printed, your job is to react to each Monitor notification by dispatching one sub-agent worker per event. This continues for the lifetime of your session (or until the user issues `/babysit stop`).
 
 ### Reading events
 
-Invoke the **Monitor** tool against the **SHELL_ID** captured when you launched `poll.sh`. Each delivery from Monitor is one or more new stdout lines from the poller. Treat every non-empty line as a single JSON event — `poll.sh` guarantees one event per line and never emits partial lines.
+Each Monitor notification carries one or more new stdout lines from `poll.sh`. Treat every non-empty line as a single JSON event — `poll.sh` guarantees one event per line and never emits partial lines. (Log output from `poll.sh` goes to stderr and never reaches you as a notification; Monitor only delivers stdout.)
 
 For each line you receive:
 
@@ -322,8 +335,8 @@ If a line fails to parse as JSON, surface it to the user verbatim (prefix with `
 
 There are exactly three event shapes, all emitted by `poll.sh`:
 
-- **`{"type":"comment_thread","pr":...,"thread_root_id":...,"comments":[{id,user.login,body,created_at,in_reply_to_id},...],"file":...,"line":...,"diff_hunk":...}`** — a new (or newly-extended) review-comment thread on the PR.
-- **`{"type":"build_failure","pr":...,"build_number":...,"state":"failed","pipeline":...,"branch":...,"jobs":[{id,name,state},...]}`** — a Buildkite build for this branch that has finished in a failed state.
+- **`{"type":"comment_thread","pr":...,"repo":...,"branch":...,"thread_root_id":...,"new_comment_ids":[...],"comments":[{id,user.login,body,created_at,in_reply_to_id},...],"file":...,"line":...,"diff_hunk":...}`** — a new (or newly-extended) review-comment thread on the PR. `new_comment_ids` is the subset of comment ids the worker must respond to; `comments` is the full thread (sorted by `created_at`) for context.
+- **`{"type":"build_failure","pr":...,"repo":...,"branch":...,"pipeline":...,"build_number":...,"state":"failed","jobs":[{id,name,state},...]}`** — a Buildkite build for this branch that has finished in a failed state.
 - **`{"type":"error","kind":...,"pr":...,"message":...}`** — `poll.sh` itself hit a recoverable problem (API failure, missing field, etc.) and wants to surface it.
 
 Handle each `.type` as follows:
@@ -336,16 +349,16 @@ Handle each `.type` as follows:
 
 ### Parallelism
 
-If a single Monitor delivery contains multiple new event lines (because two or more events arrived inside the same poll cycle), spawn **all** of the resulting sub-agents in a **single assistant message** with one Agent tool call per event. Do not serialize them. Sub-agents are independent — comment-check on thread A and build-check on build #123 have no shared state to contend for, and running them in parallel is the whole point of the hybrid model.
+If a single Monitor notification batches multiple new event lines (because two or more events arrived inside the same poll cycle — Monitor groups stdout lines within 200ms), spawn **all** of the resulting sub-agents in a **single assistant message** with one Agent tool call per event. Do not serialize them. Sub-agents are independent — comment-check on thread A and build-check on build #123 have no shared state to contend for, and running them in parallel is the whole point of the hybrid model.
 
-If the same Monitor delivery includes an `error` event alongside `comment_thread` / `build_failure` events, print the error line in the same assistant message as the sub-agent calls — the user-visible text and the tool calls can coexist.
+If the same notification includes an `error` event alongside `comment_thread` / `build_failure` events, print the error line in the same assistant message as the sub-agent calls — the user-visible text and the tool calls can coexist.
 
 ### Stopping the loop
 
 The loop ends when one of the following happens:
 
-- The user issues `/babysit stop`, which terminates `poll.sh` and (by extension) closes its stdout. Monitor will deliver no more events.
+- The user issues `/babysit stop`, which sends `kill -TERM` to `poll.sh` via its PID file. Monitor reports the process exited; no further notifications arrive.
 - The user kills the session.
-- `poll.sh` exits on its own (graceful shutdown — schema upgrade, repeated fatal errors, etc.). Monitor will report that the backgrounded shell has exited; surface that to the user as `babysit poller exited (status=<N>). To restart, run /babysit again.` and stop reading.
+- `poll.sh` exits on its own (repeated fatal errors, etc.). Monitor reports the process exited with status `<N>`; surface that to the user as `babysit poller exited (status=<N>). To restart, run /babysit again.` and stop reading.
 
 Do not attempt to restart `poll.sh` automatically — if the poller dies, the user gets to decide whether to relaunch.

@@ -62,6 +62,21 @@ DROP INDEX IF EXISTS idx_pending_events_pr;
 SQL
 fi
 
+# v2->v3: also remove orphan filesystem artifacts from the old dispatcher
+# (per-burst dispatch logs, per-PR dispatch lockdirs). v3 never reads these;
+# leaving them around just clutters the data dir. Globs are no-ops if nothing
+# matches.
+shopt -s nullglob
+v2_logs=( "${BABYSIT_DIR}"/dispatch-*.log )
+v2_lockdirs=( "${BABYSIT_DIR}"/dispatch-lock-*.d )
+shopt -u nullglob
+if (( ${#v2_logs[@]} > 0 )); then
+    rm -f "${v2_logs[@]}"
+fi
+if (( ${#v2_lockdirs[@]} > 0 )); then
+    rm -rf "${v2_lockdirs[@]}"
+fi
+
 NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # --- (c)-(e) Walk legacy dirs --------------------------------------------

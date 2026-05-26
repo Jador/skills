@@ -2,16 +2,18 @@
 set -euo pipefail
 
 # poll.sh — Persistent polling loop for babysit skill.
-# Launched via the Monitor tool. Read-only event producer:
+# Launched by the user session via the Monitor tool with persistent: true.
+# Read-only event producer:
 #   - Fetches comments + failed builds via gh/bk on each cycle.
 #   - Dedupes against the `seen_events` SQLite table.
-#   - For every unseen event, prints one JSON line to stdout (consumed by
-#     the user session via Monitor) and records the event in `seen_events`
-#     so it is not re-emitted on the next cycle.
+#   - For every unseen event, prints one JSON line to stdout. Monitor
+#     delivers each stdout line to the user session as a notification;
+#     the session reacts by spawning a sub-agent worker per event.
+#   - Log lines go to stderr (Monitor does not surface stderr as
+#     notifications, so the JSON event stream stays clean).
 #
 # poll.sh is the only writer to `seen_events`. It does not spawn any
-# downstream processes; the user session is responsible for reacting to
-# emitted JSON lines (e.g. spawning a sub-agent per event).
+# downstream processes.
 #
 # Usage: poll.sh [<pipeline-slug>] [--no-comments] [--no-builds] [--interval N]
 
@@ -96,21 +98,21 @@ DB_PY="${ASSETS_DIR}/db.py"
 mkdir -p "$STATE_DIR"
 
 ###############################################################################
-# Self-log: tee stdout+stderr to a per-PR poll log for observability.
+# Self-log: tee stderr to a per-PR poll log for observability.
 #
-# poll.sh runs as a backgrounded shell when launched via `bash run_in_background`
-# — the harness captures output to an ephemeral task buffer that the user can't
-# tail. Without this, every cycle was invisible. Now: live progress at
-# ${STATE_DIR}/poll-${REPO_SAFE}-${PR}.log, follow with `tail -f`.
+# Stdout is reserved for JSON events the consumer (Monitor tool) reads as the
+# event stream — log lines must not pollute it. Logs go to stderr, which is
+# teed to ${STATE_DIR}/poll-${REPO_SAFE}-${PR}.log; follow with `tail -f`.
 #
 # Process substitution + exec is bash 3.2-compatible.
 ###############################################################################
 POLL_LOG="${STATE_DIR}/poll-${REPO_SAFE}-${PR}.log"
-exec > >(tee -a "$POLL_LOG") 2>&1
+exec 2> >(tee -a "$POLL_LOG" >&2)
 
-# Timestamped log line. Used throughout the poll loop for visibility.
+# Timestamped log line. Writes to stderr so the JSON event stream on stdout
+# stays clean.
 log() {
-  printf '[%s] [poll] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
+  printf '[%s] [poll] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
 }
 
 log "starting babysit poll loop"
@@ -127,8 +129,10 @@ echo "$$" > "$POLLER_PID_FILE"
 trap 'log "poll loop exiting"; rm -f "$POLLER_PID_FILE"' EXIT
 
 # Ensure schema is applied. Idempotent: schema.sql uses CREATE IF NOT EXISTS.
+# Redirect stdout to /dev/null too — PRAGMA journal_mode=WAL echoes "wal",
+# which would otherwise pollute the JSON event stream on stdout.
 if [[ -f "$SCHEMA_FILE" ]]; then
-  sqlite3 "$STATE_DB" < "$SCHEMA_FILE" 2>/dev/null || {
+  sqlite3 "$STATE_DB" < "$SCHEMA_FILE" >/dev/null 2>&1 || {
     echo '{"type":"error","kind":"init","message":"Failed to apply schema.sql to state.db"}'
     exit 1
   }
@@ -162,48 +166,56 @@ poll_comments() {
     return
   }
 
-  # Pull the set of already-seen comment-thread event_ids from seen_events.
+  # Pull the set of already-seen individual comment ids from seen_events.
+  # Dedup is per-comment (not per-thread) so follow-up comments on a thread
+  # whose root was already emitted still surface as new events.
   local seen_json
   seen_json=$(db_query <<SQL
-SELECT event_id FROM seen_events WHERE pr = $PR AND kind = 'comment_thread';
+SELECT event_id FROM seen_events WHERE pr = $PR AND kind = 'comment';
 SQL
 )
-  # Convert newline-separated ids into a JSON array.
   local seen_array
   if [[ -z "$seen_json" ]]; then
     seen_array="[]"
   else
-    seen_array=$(printf "%s\n" "$seen_json" | jq -R . | jq -s 'map(tonumber? // .)')
+    seen_array=$(printf "%s\n" "$seen_json" | jq -R . | jq -s '.')
   fi
 
-  # Build one event per thread. Thread root id is the event_id.
-  # Filter out babysit-agent self-authored comments. A thread is "new" if its
-  # thread_root_id is not in $seen_array.
+  # Build one event per thread that has any new (unseen, non-self-authored)
+  # comments. The event carries new_comment_ids so the worker prompt can
+  # target only the comments that have not yet been handled.
   local events
   events=$(echo "$raw_comments" | jq -c --argjson seen "$seen_array" '
     [.[]] as $all |
 
-    # Threads keyed by root id
+    # Group all comments by thread root id.
     ($all | map({ key: ((.in_reply_to_id // .id) | tostring), value: . }) | group_by(.key) |
       map({ thread_root_id: (.[0].key | tonumber), comments: [.[].value] })
     ) as $threads |
 
     $threads[] |
-    .thread_root_id as $root_id |
-    select(($seen | map(. == $root_id) | any) | not) |
     .comments |= sort_by(.created_at) |
+    .thread_root_id as $root_id |
 
-    # Skip threads where every comment is babysit-agent self-authored
-    select(
-      any(.comments[]; (.body // "") | contains("<!-- babysit-agent -->") | not)
-    ) |
+    # New = not in seen_array AND not babysit-agent self-authored.
+    ( [ .comments[]
+        | . as $c
+        | select( (($c.body // "") | contains("<!-- babysit-agent -->")) | not )
+        | select( ($seen | map(. == ($c.id | tostring)) | any) | not )
+      ]
+    ) as $new_comments |
+
+    select(($new_comments | length) > 0) |
 
     ( [ .comments[] | select(.id == $root_id) ] | first // .comments[0] ) as $root |
 
     {
       type: "comment_thread",
       pr: '"$PR"',
+      repo: "'"$REPO"'",
+      branch: "'"$BRANCH"'",
       thread_root_id: $root_id,
+      new_comment_ids: [ $new_comments[].id ],
       comments: [ .comments[] | {
         id: .id,
         user: { login: .user.login },
@@ -217,25 +229,30 @@ SQL
     }
   ' 2>/dev/null) || return 0
 
-  # For each unseen event: print the JSON payload to stdout (the user
-  # session reads these via Monitor), then record the (pr, kind, event_id)
-  # in seen_events so we never re-emit it.
+  # For each event: print the JSON payload to stdout (Monitor delivers
+  # each line to the user session), then record every new comment id in
+  # seen_events so neither it nor a follow-up burst is re-emitted.
   local now emitted=0
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   while IFS= read -r evt; do
     [[ -z "$evt" ]] && continue
-    local root_id
+    local root_id new_ids
     root_id=$(echo "$evt" | jq -r '.thread_root_id')
     [[ -z "$root_id" || "$root_id" == "null" ]] && continue
+    new_ids=$(echo "$evt" | jq -r '.new_comment_ids[]')
+    [[ -z "$new_ids" ]] && continue
     printf '%s\n' "$evt"
-    python3 "$DB_PY" insert_seen \
-      --db "$STATE_DB" \
-      --pr "$PR" \
-      --kind "comment_thread" \
-      --event-id "$root_id" \
-      --ts "$now" >/dev/null
+    while IFS= read -r cid; do
+      [[ -z "$cid" ]] && continue
+      python3 "$DB_PY" insert_seen \
+        --db "$STATE_DB" \
+        --pr "$PR" \
+        --kind "comment" \
+        --event-id "$cid" \
+        --ts "$now" >/dev/null
+    done <<< "$new_ids"
     emitted=$((emitted + 1))
-    log "emitted comment_thread event_id=$root_id"
+    log "emitted comment_thread thread_root_id=$root_id new=$(echo "$new_ids" | wc -l | tr -d ' ')"
   done <<< "$events"
   if (( emitted > 0 )); then log "poll_comments: $emitted new comment thread(s) emitted"; fi
 }
@@ -283,6 +300,7 @@ SQL
     {
       type: "build_failure",
       pr: '"$PR"',
+      repo: "'"$REPO"'",
       build_number: .number,
       state: "failed",
       pipeline: "'"$PIPELINE"'",
