@@ -57,7 +57,7 @@ Babysit is a hybrid observer + session pattern with three roles:
 2. **Your user session — event reader.** Monitor delivers each stdout line from `poll.sh` to your session as a notification. Each line is one of these JSON event shapes:
    - `{"type":"comment_thread","pr":...,"repo":...,"branch":...,"thread_root_id":...,"new_comment_ids":[...],"comments":[...],"file":...,"line":...,"diff_hunk":...}`
    - `{"type":"build_failure","pr":...,"repo":...,"branch":...,"pipeline":...,"build_number":...,"state":"failed","jobs":[...]}`
-   - `{"type":"error","kind":...,"pr":...,"message":...}`
+   - `{"type":"error","kind":...,"pr":...,"message":...}` — `pr` is `null` for `kind:"init"` errors emitted before PR detection has succeeded; otherwise it is the integer PR number.
 
    For each event, spawn one sub-agent via the `Agent` tool, using `assets/comment-check-prompt.md` for `comment_thread` events and `assets/build-check-prompt.md` for `build_failure` events. Surface `error` events to the user and continue. The sub-agents do the actual work (replying to comments, pushing build fixes).
 

@@ -62,13 +62,13 @@ BRANCH=""
 
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || true
 if [[ -z "$REPO" ]]; then
-  echo '{"type":"error","kind":"init","message":"Failed to detect repository via gh repo view"}'
+  echo '{"type":"error","kind":"init","pr":null,"message":"Failed to detect repository via gh repo view"}'
   exit 1
 fi
 
 PR_INFO=$(gh pr view --json number,headRefName --jq '.number,.headRefName' 2>/dev/null) || true
 if [[ -z "$PR_INFO" ]]; then
-  echo '{"type":"error","kind":"init","message":"Failed to detect PR number and branch via gh pr view"}'
+  echo '{"type":"error","kind":"init","pr":null,"message":"Failed to detect PR number and branch via gh pr view"}'
   exit 1
 fi
 
@@ -76,7 +76,15 @@ PR=$(echo "$PR_INFO" | head -n1)
 BRANCH=$(echo "$PR_INFO" | tail -n1)
 
 if [[ -z "$PR" || -z "$BRANCH" ]]; then
-  echo '{"type":"error","kind":"init","message":"Failed to parse PR number or branch name"}'
+  echo '{"type":"error","kind":"init","pr":null,"message":"Failed to parse PR number or branch name"}'
+  exit 1
+fi
+
+# Builds were nominally enabled but no pipeline was passed — refuse to
+# start a poller that would silently never check CI. Better to fail loud
+# now than to silently miss every build failure for the session lifetime.
+if [[ "$NO_BUILDS" == "false" && -z "$PIPELINE" ]]; then
+  echo '{"type":"error","kind":"init","pr":'"$PR"',"message":"Builds enabled but no pipeline slug provided. Pass a pipeline slug or use --no-builds."}'
   exit 1
 fi
 
@@ -133,7 +141,7 @@ trap 'log "poll loop exiting"; rm -f "$POLLER_PID_FILE"' EXIT
 # which would otherwise pollute the JSON event stream on stdout.
 if [[ -f "$SCHEMA_FILE" ]]; then
   sqlite3 "$STATE_DB" < "$SCHEMA_FILE" >/dev/null 2>&1 || {
-    echo '{"type":"error","kind":"init","message":"Failed to apply schema.sql to state.db"}'
+    echo '{"type":"error","kind":"init","pr":'"$PR"',"message":"Failed to apply schema.sql to state.db"}'
     exit 1
   }
 fi
