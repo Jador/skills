@@ -70,6 +70,12 @@ fi
 # Idempotent: on v3 databases the pragma check returns 1 and the body skips.
 has_repo=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM pragma_table_info('seen_events') WHERE name='repo';")
 if [[ "$has_repo" == "0" ]]; then
+    # v2 poll.sh wrote kind='comment_thread'; v3 poll.sh queries
+    # kind='comment'. Without the CASE rewrite below, every legacy
+    # comment-thread row would survive the schema upgrade with its old
+    # kind value, the v3 SELECT would miss it, and the thread would
+    # re-emit on first poll — producing duplicate worker replies on
+    # every previously-handled review thread.
     sqlite3 "$DB_FILE" <<'SQL' >/dev/null
 BEGIN;
 ALTER TABLE seen_events RENAME TO seen_events_v2;
@@ -82,7 +88,10 @@ CREATE TABLE seen_events (
     PRIMARY KEY (repo, pr, kind, event_id)
 );
 INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts)
-    SELECT 'legacy/unknown', pr, kind, event_id, ts FROM seen_events_v2;
+    SELECT 'legacy/unknown', pr,
+           CASE kind WHEN 'comment_thread' THEN 'comment' ELSE kind END,
+           event_id, ts
+    FROM seen_events_v2;
 DROP TABLE seen_events_v2;
 COMMIT;
 SQL

@@ -43,10 +43,14 @@ def _build_v2_db(path: Path) -> None:
     conn = sqlite3.connect(str(path))
     try:
         conn.executescript(V2_SCHEMA)
+        # The first v3 poll.sh wrote kind='comment_thread'; current v3
+        # queries kind='comment'. Seed with the real v2 value so the
+        # test catches the comment_thread -> comment rewrite during
+        # upgrade.
         conn.execute(
             "INSERT INTO seen_events (pr, kind, event_id, ts) "
             "VALUES (?, ?, ?, ?)",
-            (42, "comment", "999", "2026-05-22T09:00:00Z"),
+            (42, "comment_thread", "999", "2026-05-22T09:00:00Z"),
         )
         conn.execute(
             "INSERT INTO seen_events (pr, kind, event_id, ts) "
@@ -117,10 +121,49 @@ def test_v2_to_v3_adds_repo_column_with_sentinel(plugin_data: Path):
     assert info["event_id"]["pk"] == 4
 
     rows = _fetchall_rows(db)
+    # Note: kind for the comment row was 'comment_thread' in v2 and must
+    # be rewritten to 'comment' so v3 poll.sh's SELECT finds it.
     assert rows == [
         ("legacy/unknown", 7, "build_failure", "100", "2026-05-22T09:01:00Z"),
         ("legacy/unknown", 42, "comment", "999", "2026-05-22T09:00:00Z"),
     ]
+
+
+def test_v2_comment_thread_kind_rewritten_to_comment(plugin_data: Path):
+    # Dedicated regression for the kind-rewrite step: without it every
+    # previously-handled review thread would re-dispatch on first v3
+    # poll and post a duplicate babysit-agent reply.
+    db = plugin_data / "babysit" / "state.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        conn.executescript(V2_SCHEMA)
+        for cid in ("100", "101", "102"):
+            conn.execute(
+                "INSERT INTO seen_events (pr, kind, event_id, ts) "
+                "VALUES (?, ?, ?, ?)",
+                (42, "comment_thread", cid, "2026-05-22T09:00:00Z"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = _run_migrate(plugin_data)
+    assert result.returncode == 0, result.stderr
+
+    # No row may carry the v2 kind after upgrade.
+    conn = sqlite3.connect(str(db))
+    try:
+        residual = conn.execute(
+            "SELECT COUNT(*) FROM seen_events WHERE kind = 'comment_thread'"
+        ).fetchone()[0]
+        migrated = conn.execute(
+            "SELECT event_id FROM seen_events "
+            "WHERE kind = 'comment' AND pr = 42 ORDER BY event_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert residual == 0
+    assert [r[0] for r in migrated] == ["100", "101", "102"]
 
 
 def test_v2_to_v3_idempotent_second_run_is_noop(plugin_data: Path):
