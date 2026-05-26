@@ -347,15 +347,18 @@ SQL
   # dispatch-prompt.md uses <PLACEHOLDER> style (angle brackets); bash
   # parameter expansion (${var//pat/repl}) handles that portably with no
   # new dependencies.
+  #
+  # <FREEFORM_INSTRUCTIONS> is substituted LAST so any user-supplied text
+  # containing the literal placeholder names of later passes is not
+  # rewritten by subsequent expansions.
   local prompt
   prompt="$(cat "$DISPATCH_PROMPT_FILE")"
   prompt="${prompt//<REPO>/$REPO}"
   prompt="${prompt//<PR_NUMBER>/$PR}"
   prompt="${prompt//<BRANCH_NAME>/$BRANCH}"
   prompt="${prompt//<PIPELINE>/$PIPELINE}"
-  prompt="${prompt//<FREEFORM_INSTRUCTIONS>/$FREEFORM}"
   prompt="${prompt//<EVENT_COUNT>/$count}"
-  prompt="${prompt//<DISPATCHER_PID>/$$}"
+  prompt="${prompt//<FREEFORM_INSTRUCTIONS>/$FREEFORM}"
 
   # Log file for the dispatcher's output — useful for crash diagnosis.
   # Scoped by repo+PR so cross-repo runs do not stomp on each other.
@@ -363,9 +366,16 @@ SQL
   log_file="${STATE_DIR}/dispatch-${REPO_SAFE}-${PR}-$(date -u +%s).log"
 
   # Spawn dispatcher as a background `claude -p` headless session. Export
-  # the two env vars the dispatcher prompt expects (BABYSIT_STATE_DB and
-  # CLAUDE_SKILL_DIR) into its environment. Dispatcher inherits cwd from
-  # poll.sh (the repo root, set when the user started babysit).
+  # the env vars the dispatcher prompt expects (BABYSIT_STATE_DB,
+  # CLAUDE_SKILL_DIR, DISPATCHER_PID) into its environment. Dispatcher
+  # inherits cwd from poll.sh (the repo root, set when the user started
+  # babysit).
+  #
+  # DISPATCHER_PID resolves to the spawned process's own PID via $BASHPID
+  # inside the subshell + exec — the subshell's PID becomes claude's PID
+  # after exec, and $! outside captures the same value. This is the only
+  # way to thread the dispatcher's own PID into its environment, since the
+  # PID isn't known until after spawn.
   #
   # `--add-dir` is required: a headless `claude -p` session restricts
   # tool access to its cwd, but the dispatcher must Read worker prompts
@@ -373,16 +383,18 @@ SQL
   # ${CLAUDE_PLUGIN_DATA}/babysit/ — both outside the user's repo.
   # `--max-budget-usd` caps spend per dispatch since each burst is a
   # fresh session with no inherited limits.
-  BABYSIT_STATE_DB="$STATE_DB" \
-  CLAUDE_SKILL_DIR="$CLAUDE_SKILL_DIR" \
-  claude -p \
-    --permission-mode acceptEdits \
-    --output-format json \
-    --max-budget-usd 50 \
-    --add-dir "${CLAUDE_SKILL_DIR}" \
-    --add-dir "${CLAUDE_PLUGIN_DATA}" \
-    "$prompt" \
-    > "$log_file" 2>&1 &
+  (
+    export DISPATCHER_PID=$BASHPID
+    export BABYSIT_STATE_DB="$STATE_DB"
+    export CLAUDE_SKILL_DIR="$CLAUDE_SKILL_DIR"
+    exec claude -p \
+      --permission-mode acceptEdits \
+      --output-format json \
+      --max-budget-usd 50 \
+      --add-dir "${CLAUDE_SKILL_DIR}" \
+      --add-dir "${CLAUDE_PLUGIN_DATA}" \
+      "$prompt"
+  ) > "$log_file" 2>&1 &
   local dispatcher_pid=$!
 
   # Atomically rewrite the placeholder PID written by acquire_dispatch_lock
@@ -451,14 +463,27 @@ acquire_dispatch_lock() {
   while [[ -d "$lockdir" ]]; do
     local pid
     pid="$(cat "${lockdir}/pid" 2>/dev/null || echo '')"
-    if [[ -z "$pid" ]] || _dispatcher_alive "$pid"; then
-      # Empty pid file means acquisition is in progress in another shell;
-      # do NOT clear it — that would defeat the lock. Treat as loser.
+    if [[ -z "$pid" ]]; then
+      # No pid file yet — either a concurrent acquisition in another shell
+      # (microseconds-wide window between mkdir and pid write), or an
+      # orphan from a poll.sh SIGKILL / OOM / disk-full crash between the
+      # two ops. Disambiguate via the lockdir's mtime: if older than 60s,
+      # treat as orphan and fall through to the mv-n reap. Otherwise treat
+      # as in-flight acquisition and return as loser.
+      local lockdir_age
+      lockdir_age=$(($(date -u +%s) - $(stat -c %Y "$lockdir" 2>/dev/null \
+        || stat -f %m "$lockdir" 2>/dev/null \
+        || echo 0)))
+      if (( lockdir_age <= 60 )); then
+        return 1
+      fi
+      echo "[poll] orphan dispatch lock for PR ${pr} (empty pid, age ${lockdir_age}s); reaping" >&2
+    elif _dispatcher_alive "$pid"; then
       return 1
     fi
     local stale="${lockdir}.stale.$$.$(date -u +%s)"
     if mv -n "$lockdir" "$stale" 2>/dev/null; then
-      echo "[poll] stale dispatch lock for PR ${pr} (pid ${pid} not a live claude proc); reaping" >&2
+      echo "[poll] stale dispatch lock for PR ${pr} (pid '${pid}' not a live claude proc); reaping" >&2
       rm -rf "$stale"
     fi
   done

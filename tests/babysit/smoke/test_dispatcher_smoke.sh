@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Smoke test for A2 dispatch path: validates end-to-end that a headless
+# Smoke test for the dispatcher path: validates that a headless
 # `claude -p` dispatcher can read pending events, compute a deterministic
 # cluster_id, claim the cluster, spawn a worker sub-agent via the Agent
 # tool, parse the worker's JSON contract, and commit the worker report —
-# all through the new db.py CLI.
+# all through the db.py CLI.
 #
 # Scope (in):
 #   - db.py compute_cluster_id, claim_cluster, commit_worker_report
@@ -17,7 +17,7 @@
 # Cost budget: < $5 per run.
 #
 # Usage:
-#   bash tests/babysit/smoke/test_a2_end_to_end.sh
+#   bash tests/babysit/smoke/test_dispatcher_smoke.sh
 # Exits 0 on PASS, non-zero on FAIL.
 
 set -uo pipefail
@@ -113,6 +113,11 @@ echo "expected cluster_id: ${EXPECTED_CLUSTER_ID}"
 # replaced by a single-event cluster (deterministic for the smoke).
 # ---------------------------------------------------------------------------
 
+# Log filename deliberately omits the ${REPO_SAFE} segment that production
+# poll.sh:363 uses (`dispatch-<REPO_SAFE>-<PR>-*.log`). This smoke test
+# does not exercise poll.sh's repo-detection step (see Scope (out) above),
+# so there is no REPO_SAFE to interpolate — the bare `dispatch-<PR>-*.log`
+# pattern is sufficient here and Check 6 below matches it consistently.
 DISPATCH_LOG="${CLAUDE_PLUGIN_DATA}/babysit/dispatch-${PR}-$(date -u +%s).log"
 RESULT_JSON="${CLAUDE_PLUGIN_DATA}/babysit/dispatch-${PR}-result.json"
 
@@ -180,6 +185,10 @@ echo "spawning claude -p dispatcher; logging to ${DISPATCH_LOG}"
 echo "spawning at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 set +e
+# `--no-session-persistence` is deliberate for the smoke test only — it
+# prevents this run from polluting the operator's on-disk session store
+# (so `/resume` history stays clean). Production poll.sh:378-385 omits it
+# on purpose so a real dispatcher's session CAN be resumed for debugging.
 claude -p \
   --permission-mode acceptEdits \
   --output-format json \
