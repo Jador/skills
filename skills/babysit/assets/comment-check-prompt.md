@@ -39,14 +39,24 @@ All subsequent `jq` invocations below read from `"$EVENT_FILE"` (e.g. `jq -r '.p
 
 **The orchestrating session owns all state writes.** This worker MUST NOT touch any state file, MUST NOT write under the plugin data directory, and MUST NOT write any seen-comments file. The worker observes, acts on the PR (comments, code edits, commits), and reports back to the orchestrating session.
 
+## Step 0: Extract Identifiers
+
+Pull the identifiers every later step needs from `$EVENT_FILE` into shell variables. Do this **before any other shell commands**: later steps invoke `gh` with `"$PR"` and `"$REPO"`, and skipping this hoist would mean those calls run with empty arguments and fail silently.
+
+```
+PR=$(jq -r '.pr' "$EVENT_FILE")
+REPO=$(jq -r '.repo' "$EVENT_FILE")
+EXPECTED_BRANCH=$(jq -r '.branch' "$EVENT_FILE")
+REPLY_TO_ID=$(jq -r '.new_comment_ids | max' "$EVENT_FILE")
+```
+
 ## Step 1: Understand Context
 
-1. Parse the event JSON to extract `pr`, `repo`, `branch`, `thread_root_id`, `new_comment_ids`, `comments`, `file`, `line`, `diff_hunk`.
-2. Read the full `comments` array as a conversation. Understand the progression of the discussion from the first comment to the last.
-3. Identify which comments are new — membership in `new_comment_ids`. These are the ones you must respond to. Older comments are context only.
-4. Read the referenced file at `file` (around `line`).
-5. Use `diff_hunk` and the surrounding code to grasp what the thread refers to.
-6. If needed, fetch the PR description for broader context:
+1. Read the full `comments` array as a conversation. Understand the progression of the discussion from the first comment to the last.
+2. Identify which comments are new — membership in `new_comment_ids`. These are the ones you must respond to. Older comments are context only.
+3. Read the referenced file at `file` (around `line`).
+4. Use `diff_hunk` and the surrounding code to grasp what the thread refers to.
+5. If needed, fetch the PR description for broader context:
    ```
    gh pr view "$PR" --repo "$REPO" --json body,title
    ```
@@ -95,31 +105,18 @@ You are not confident in either agree or disagree, OR any of the following apply
 
 **Branch verification (defense-in-depth).** Before doing anything that mutates the repo, verify the worktree is on the expected branch. The orchestrating session already checked, but the worker is what actually runs `git commit`, so re-check.
 
-Extract the expected branch from the event JSON and compare against the current branch:
+Read the current branch and compare to `$EXPECTED_BRANCH` (already extracted in Step 0):
 
 ```
-EXPECTED_BRANCH=$(jq -r '.branch' "$EVENT_FILE")
 CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
-if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
-  # Abort — do not commit, do not post comments. Skip to the Return
-  # section with summary: "Branch mismatch: expected <expected>, got <current>".
-  exit 0
-fi
+echo "expected=$EXPECTED_BRANCH current=$CURRENT_BRANCH"
 ```
 
-If the branches differ, abort immediately and report back with a one-line summary like `Branch mismatch: expected feat/x, got main` and no files touched.
+**If `$CURRENT_BRANCH` does not equal `$EXPECTED_BRANCH`: STOP.** Do not run any further shell commands. Do not call `gh api`, do not edit files, do not commit. Skip the rest of Step 3 entirely and go directly to the Return section with the summary `Branch mismatch: expected <expected>, got <current>`. (A bash `exit 0` only ends the shell subprocess — your reasoning would otherwise continue executing the steps below, including `git commit` on the wrong branch.)
 
-Otherwise, proceed.
+If the branches match, proceed.
 
-All actions post a **single reply** to the last new comment in the thread — the comment with the highest `id` in `new_comment_ids`. Use this as `$REPLY_TO_ID`. This keeps the reply at the bottom of the conversation. The reply should address the thread holistically, not just the last comment.
-
-Pull useful identifiers into shell variables (`$PR`, `$REPO`, `$BRANCH`, `$REPLY_TO_ID`) once so the commands below stay readable:
-
-```
-PR=$(jq -r '.pr' "$EVENT_FILE")
-REPO=$(jq -r '.repo' "$EVENT_FILE")
-REPLY_TO_ID=$(jq -r '.new_comment_ids | max' "$EVENT_FILE")
-```
+All actions post a **single reply** to the last new comment in the thread — the comment with the highest `id` in `new_comment_ids`. `$REPLY_TO_ID` (extracted in Step 0) holds that value. Posting one reply at the bottom keeps the conversation clean; address the thread holistically, not just the last comment.
 
 ### If AGREE — Fix, Verify, Commit, Reply
 

@@ -92,6 +92,89 @@ def test_worker_prompts_use_heredoc_not_single_quote_eventjson():
         )
 
 
+def _fenced_code_blocks(text: str) -> list[str]:
+    """Return the bodies of all triple-fenced code blocks in `text`.
+
+    Fences may be indented (e.g. inside a markdown numbered-list item).
+    """
+    blocks: list[str] = []
+    in_block = False
+    buf: list[str] = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("```"):
+            if in_block:
+                blocks.append("\n".join(buf))
+                buf = []
+                in_block = False
+            else:
+                in_block = True
+            continue
+        if in_block:
+            buf.append(line)
+    return blocks
+
+
+def test_worker_prompts_use_prose_stop_not_bash_exit():
+    # `exit 0` in a fenced bash block only exits the shell subprocess.
+    # The LLM agent keeps reading the prompt and runs the rest of the
+    # steps (commit, push, post replies) anyway. The prompt must drive
+    # the abort through prose, not shell exit.
+    for prompt in (COMMENT_PROMPT, BUILD_PROMPT):
+        text = prompt.read_text()
+        for block in _fenced_code_blocks(text):
+            # `exit 0` appearing as an actual shell statement (line by
+            # itself, possibly indented) is the antipattern. Inline
+            # backtick-quoted mentions in prose are fine.
+            for line in block.splitlines():
+                stripped = line.strip()
+                assert stripped != "exit 0", (
+                    f"{prompt.name} still contains a bare `exit 0` shell "
+                    "statement in a fenced code block; the LLM agent will "
+                    "continue past it. Use a prose STOP instruction instead."
+                )
+        # The new pattern uses an emphasized "STOP" keyword in the
+        # prose so the LLM agent treats it as a hard stop.
+        assert "STOP" in text, f"{prompt.name} missing STOP keyword"
+
+
+def test_comment_prompt_extracts_identifiers_before_gh_calls():
+    # Step 1.6 in the prior version invoked `gh pr view "$PR" --repo
+    # "$REPO" ...` before Step 3 extracted those variables. Hoist the
+    # extraction to a dedicated step that precedes every gh call.
+    text = COMMENT_PROMPT.read_text()
+    step_zero_idx = text.find("## Step 0:")
+    assert step_zero_idx != -1, "missing Step 0 identifier extraction"
+
+    # Find the first `gh ` invocation that lives inside a fenced code
+    # block (i.e. a real shell command the worker will run), not a
+    # prose mention.
+    first_gh_invocation_idx = -1
+    in_block = False
+    block_start = 0
+    for line_idx, line in enumerate(text.splitlines(keepends=True)):
+        pass  # placeholder; we iterate by position instead below.
+
+    pos = 0
+    in_block = False
+    for line in text.splitlines(keepends=True):
+        if line.lstrip().startswith("```"):
+            in_block = not in_block
+        elif in_block and ("gh pr " in line or "gh api " in line):
+            first_gh_invocation_idx = pos
+            break
+        pos += len(line)
+    assert first_gh_invocation_idx != -1, "no gh invocation found in fenced block"
+    assert first_gh_invocation_idx > step_zero_idx, (
+        "first `gh` invocation precedes the Step 0 identifier extraction "
+        "— PR/REPO would be unset when gh runs"
+    )
+
+    # And the extraction must actually assign PR and REPO.
+    step_zero_section = text[step_zero_idx:text.find("## Step 1", step_zero_idx)]
+    assert 'PR=$(jq -r ' in step_zero_section
+    assert 'REPO=$(jq -r ' in step_zero_section
+
+
 def test_worker_prompts_route_jq_through_event_file():
     for prompt in (COMMENT_PROMPT, BUILD_PROMPT):
         text = prompt.read_text()

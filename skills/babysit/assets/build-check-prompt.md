@@ -39,29 +39,26 @@ You do NOT read or write any state file. The orchestrating session owns all stat
 
 ---
 
-## Step 0: Branch Verification
+## Step 0: Extract Identifiers and Verify Branch
 
-Before doing anything else, verify the worktree is on the expected branch:
-
-```
-EXPECTED_BRANCH=$(jq -r '.branch' "$EVENT_FILE")
-CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
-if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
-  # Abort — skip directly to Return with summary "Branch mismatch: expected ..., got ..."
-  exit 0
-fi
-```
-
-If the branches differ, abort immediately and report `Branch mismatch: expected <expected>, got <current>`. Do NOT take any action (no fix, no retry, no escalate).
-
-Pull useful identifiers into shell variables for later commands:
+Pull the identifiers every later step needs from `$EVENT_FILE` into shell variables. Do this **first**, before any `gh`/`bk` calls.
 
 ```
 PR=$(jq -r '.pr' "$EVENT_FILE")
 REPO=$(jq -r '.repo' "$EVENT_FILE")
 BUILD_NUMBER=$(jq -r '.build_number' "$EVENT_FILE")
 PIPELINE=$(jq -r '.pipeline' "$EVENT_FILE")
+EXPECTED_BRANCH=$(jq -r '.branch' "$EVENT_FILE")
 ```
+
+Then verify the worktree is on the expected branch:
+
+```
+CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
+echo "expected=$EXPECTED_BRANCH current=$CURRENT_BRANCH"
+```
+
+**If `$CURRENT_BRANCH` does not equal `$EXPECTED_BRANCH`: STOP.** Do not run any further shell commands. Do not call `gh`, `bk`, edit files, retry jobs, or post comments. Skip directly to the Return section with the summary `Branch mismatch: expected <expected>, got <current>`. (A bash `exit 0` only ends the shell subprocess — your reasoning would otherwise continue executing the steps below, possibly committing or retrying against the wrong worktree state.)
 
 ---
 
