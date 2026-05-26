@@ -17,7 +17,7 @@ Note: SQLite ``VACUUM`` cannot run inside an open transaction.
 from __future__ import annotations
 
 from skills.babysit.assets.db import (
-    insert_pending_event,
+    insert_seen_event,
     list_distinct_prs,
     vacuum,
 )
@@ -65,22 +65,20 @@ def test_vacuum_on_fresh_schema_only_db(conn):
 
 
 def test_vacuum_on_db_with_rows(conn):
-    # Use an existing op to write rows, then VACUUM.
-    insert_pending_event(
+    # Use the seen_events op to write rows, then VACUUM.
+    insert_seen_event(
         conn,
         pr=42,
         kind="comment_thread",
         event_id="e1",
-        payload="{}",
-        received_ts="2026-05-22T09:00:00Z",
+        ts="2026-05-22T09:00:00Z",
     )
-    insert_pending_event(
+    insert_seen_event(
         conn,
         pr=7,
         kind="ci_failure",
         event_id="e2",
-        payload="{}",
-        received_ts="2026-05-22T09:01:00Z",
+        ts="2026-05-22T09:01:00Z",
     )
 
     # Should not raise even though we just committed transactions.
@@ -88,6 +86,6 @@ def test_vacuum_on_db_with_rows(conn):
 
     # DB still usable afterwards.
     rows = conn.execute(
-        "SELECT pr FROM pending_events ORDER BY pr ASC"
+        "SELECT pr FROM seen_events ORDER BY pr ASC"
     ).fetchall()
     assert [r[0] for r in rows] == [7, 42]
