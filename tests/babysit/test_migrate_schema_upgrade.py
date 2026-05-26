@@ -138,6 +138,34 @@ def test_v2_to_v3_idempotent_second_run_is_noop(plugin_data: Path):
     assert rows_after_first == rows_after_second
 
 
+def test_legacy_build_files_migrate_with_kind_build_failure(plugin_data: Path):
+    # Drop a legacy <pr>-seen-builds.json into the live babysit dir
+    # (which is one of LEGACY_DIRS). After migrate.sh runs, rows must
+    # land with kind='build_failure' so runtime poll.sh queries find
+    # them — kind='build' would break dedup forever.
+    babysit_dir = plugin_data / "babysit"
+    legacy_file = babysit_dir / "5-seen-builds.json"
+    legacy_file.write_text('{"100": true, "101": true}')
+
+    result = _run_migrate(plugin_data)
+    assert result.returncode == 0, result.stderr
+
+    db = babysit_dir / "state.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute(
+            "SELECT repo, pr, kind, event_id FROM seen_events "
+            "WHERE pr = 5 ORDER BY event_id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert rows == [
+        ("legacy/unknown", 5, "build_failure", "100"),
+        ("legacy/unknown", 5, "build_failure", "101"),
+    ]
+
+
 def test_fresh_v3_db_unchanged_by_migrate(plugin_data: Path):
     # Bootstrap a fresh v3 DB. Running migrate.sh against it must not
     # touch the rows.

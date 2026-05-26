@@ -203,7 +203,7 @@ for dir in "${LEGACY_DIRS[@]}"; do
                 while IFS= read -r id; do
                     [[ -z "$id" ]] && continue
                     id_esc="${id//\'/\'\'}"
-                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'build', '${id_esc}', '${NOW_TS}');"
+                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'build_failure', '${id_esc}', '${NOW_TS}');"
                 done <<< "$ids"
             fi
         done
