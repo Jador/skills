@@ -22,9 +22,6 @@ Behavioural contract under test:
 from __future__ import annotations
 
 import json
-import sqlite3
-
-import pytest
 
 from skills.babysit.assets.db import commit_worker_report
 
@@ -235,13 +232,15 @@ def test_returns_counts_dict(conn):
     assert result == {"seen_inserted": 2, "pending_deleted": 1}
 
 
-def test_pk_conflict_rolls_back_seen_and_pending_writes(conn):
-    """A duplicate worker_reports.cluster_id must abort the whole txn.
+def test_re_entry_replaces_worker_reports_row(conn):
+    """A re-claim of an already-resolved cluster overwrites worker_reports.
 
-    First call succeeds. Second call (same cluster_id) attempts to insert
-    new seen_events and delete more pending_events, but the
-    worker_reports PK conflict raises IntegrityError — and those
-    in-flight writes from the second attempt must NOT persist.
+    Under deterministic cluster_id (Guard 2) and the widened claim_cluster
+    filter, the same event set can re-enter pending_events (e.g. a build
+    that keeps failing) and be re-claimed. commit_worker_report uses
+    INSERT OR REPLACE on worker_reports so the second commit succeeds and
+    overwrites the prior row, rather than UNIQUE-failing and silently
+    stranding the worker's actual work.
     """
     _seed_cluster(conn, "cluster-G", pr=4)
     _seed_pending(conn, pr=4, kind="comment_thread", event_id="first")
@@ -260,38 +259,40 @@ def test_pk_conflict_rolls_back_seen_and_pending_writes(conn):
         now_ts="2026-05-22T10:00:00Z",
     )
 
-    seen_before = conn.execute("SELECT COUNT(*) FROM seen_events").fetchone()[0]
-    pending_before = conn.execute(
-        "SELECT COUNT(*) FROM pending_events"
-    ).fetchone()[0]
+    # Second call with same cluster_id but different resolved event:
+    # must succeed (no IntegrityError) and overwrite the prior report.
+    result = commit_worker_report(
+        conn,
+        cluster_id="cluster-G",
+        pr=4,
+        resolved_event_ids=[
+            {"kind": "comment_thread", "event_id": "second"}
+        ],
+        unresolved_event_ids=[],
+        files_touched=[],
+        commit_sha="sha2",
+        summary="second",
+        now_ts="2026-05-22T11:00:00Z",
+    )
+    assert result == {"seen_inserted": 1, "pending_deleted": 1}
 
-    # Second call: same cluster_id triggers worker_reports PK violation.
-    with pytest.raises(sqlite3.IntegrityError):
-        commit_worker_report(
-            conn,
-            cluster_id="cluster-G",
-            pr=4,
-            resolved_event_ids=[
-                {"kind": "comment_thread", "event_id": "second"}
-            ],
-            unresolved_event_ids=[],
-            files_touched=[],
-            commit_sha="sha2",
-            summary="second",
-            now_ts="2026-05-22T11:00:00Z",
-        )
-
-    # Counts must be unchanged from the rolled-back attempt.
-    seen_after = conn.execute("SELECT COUNT(*) FROM seen_events").fetchone()[0]
-    pending_after = conn.execute(
-        "SELECT COUNT(*) FROM pending_events"
-    ).fetchone()[0]
-    assert seen_after == seen_before
-    assert pending_after == pending_before
-    # And the "second" pending row in particular is still present.
-    still_there = conn.execute(
-        "SELECT 1 FROM pending_events "
-        "WHERE pr=? AND kind=? AND event_id=?",
-        (4, "comment_thread", "second"),
+    # The worker_reports row must reflect the second call's content.
+    report = conn.execute(
+        "SELECT commit_sha, summary FROM worker_reports WHERE cluster_id = ?",
+        ("cluster-G",),
     ).fetchone()
-    assert still_there is not None
+    assert report["commit_sha"] == "sha2"
+    assert report["summary"] == "second"
+
+    # And there must still be exactly one worker_reports row.
+    count = conn.execute(
+        "SELECT COUNT(*) FROM worker_reports WHERE cluster_id = ?",
+        ("cluster-G",),
+    ).fetchone()[0]
+    assert count == 1
+
+    # Both pending rows are now deleted (one by each call).
+    pending_left = conn.execute(
+        "SELECT COUNT(*) FROM pending_events WHERE pr = ?", (4,)
+    ).fetchone()[0]
+    assert pending_left == 0
