@@ -132,8 +132,21 @@ log "poll_log=$POLL_LOG"
 # Self-record poller PID under a repo+PR-scoped name so Stop mode can find
 # and terminate this process. The file holds our real numeric $$ — never a
 # harness shell-id — so `kill -TERM` always works. Cleared on exit.
+#
+# Single-flight guard: refuse to start if another poller for the same
+# (repo, PR) is already running. Use set -C (noclobber) for an atomic
+# test-and-set on the PID file. If the file is stale (PID no longer
+# alive), clear it and try again.
 POLLER_PID_FILE="${STATE_DIR}/babysit-pid-${REPO_SAFE}-${PR}.pid"
-echo "$$" > "$POLLER_PID_FILE"
+if ! (set -C; echo "$$" > "$POLLER_PID_FILE") 2>/dev/null; then
+  existing_pid=$(cat "$POLLER_PID_FILE" 2>/dev/null || true)
+  if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+    echo '{"type":"error","kind":"init","pr":'"$PR"',"message":"Another babysit poller is already running for this PR (pid '"$existing_pid"'). Run /babysit stop first."}'
+    exit 1
+  fi
+  # Stale PID file. Owning process is gone; reclaim the slot.
+  echo "$$" > "$POLLER_PID_FILE"
+fi
 trap 'log "poll loop exiting"; rm -f "$POLLER_PID_FILE"' EXIT
 
 # Ensure schema is applied. Idempotent: schema.sql uses CREATE IF NOT EXISTS.
@@ -241,9 +254,16 @@ SQL
     }
   ' 2>/dev/null) || return 0
 
-  # For each event: print the JSON payload to stdout (Monitor delivers
-  # each line to the user session), then record every new comment id in
-  # seen_events so neither it nor a follow-up burst is re-emitted.
+  # For each event: record every new comment id in seen_events FIRST,
+  # then print the JSON payload to stdout. Order matters: Monitor flushes
+  # printf to the session as soon as it is written, so emitting before
+  # the insert leaves a race window where a SIGTERM (Stop mode, OOM,
+  # crash) between emit and insert causes the same thread to re-emit on
+  # restart and the worker to post duplicate replies.
+  #
+  # Trade-off: if the poller dies between insert and printf, the event is
+  # lost. That is silent-drop, which is safer than duplicate worker
+  # replies on the PR.
   local now emitted=0
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   while IFS= read -r evt; do
@@ -253,7 +273,6 @@ SQL
     [[ -z "$root_id" || "$root_id" == "null" ]] && continue
     new_ids=$(echo "$evt" | jq -r '.new_comment_ids[]')
     [[ -z "$new_ids" ]] && continue
-    printf '%s\n' "$evt"
     while IFS= read -r cid; do
       [[ -z "$cid" ]] && continue
       python3 "$DB_PY" insert_seen \
@@ -264,6 +283,7 @@ SQL
         --event-id "$cid" \
         --ts "$now" >/dev/null
     done <<< "$new_ids"
+    printf '%s\n' "$evt"
     emitted=$((emitted + 1))
     log "emitted comment_thread thread_root_id=$root_id new=$(echo "$new_ids" | wc -l | tr -d ' ')"
   done <<< "$events"
@@ -322,7 +342,10 @@ SQL
     }
   ' 2>/dev/null) || return 0
 
-  # For each unseen event: print JSON to stdout, then record in seen_events.
+  # For each unseen event: record in seen_events FIRST, then print JSON.
+  # Same emit-after-record ordering as poll_comments — a kill between
+  # printf and insert would otherwise produce duplicate worker spawns
+  # for the same failed build on restart.
   local now emitted=0
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   while IFS= read -r evt; do
@@ -330,7 +353,6 @@ SQL
     local build_num
     build_num=$(echo "$evt" | jq -r '.build_number')
     [[ -z "$build_num" || "$build_num" == "null" ]] && continue
-    printf '%s\n' "$evt"
     python3 "$DB_PY" insert_seen \
       --db "$STATE_DB" \
       --repo "$REPO" \
@@ -338,6 +360,7 @@ SQL
       --kind "build_failure" \
       --event-id "$build_num" \
       --ts "$now" >/dev/null
+    printf '%s\n' "$evt"
     emitted=$((emitted + 1))
     log "emitted build_failure build=$build_num"
   done <<< "$events"
