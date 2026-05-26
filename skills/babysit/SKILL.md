@@ -1,7 +1,7 @@
 ---
 name: babysit
 description: Monitor a PR for review comments and build failures
-argument-hint: "[stop [--force] | clean [--dry-run]] [--no-comments] [--no-builds] [\"instructions\"]"
+argument-hint: "[stop | clean [--dry-run]] [--no-comments] [--no-builds] [\"instructions\"]"
 disable-model-invocation: true
 ---
 
@@ -36,15 +36,12 @@ Parse `$ARGUMENTS` to determine the mode of operation. Before mode detection, ex
 - `--no-comments` — disables comment monitoring
 - `--no-builds` — disables build monitoring
 - `--dry-run` — (Clean mode only) print intended deletions and stale-cluster reaps without modifying the filesystem or database
-- `--force` — (Stop mode only) reserved; in the hybrid model there is nothing besides `poll.sh` to force-terminate, so this flag is currently a no-op and is accepted only for backward compatibility
 
 Strip these flags from `$ARGUMENTS` before proceeding with mode detection below. The remaining text (after flag removal and trimming whitespace) is used for mode selection.
 
 If both `--no-comments` and `--no-builds` are specified, tell the user: "Both checks are disabled — nothing to monitor." Then stop.
 
 The `--dry-run` flag is only meaningful for Clean mode. If `--dry-run` is supplied alongside `stop` or Start mode, ignore it silently.
-
-The `--force` flag is only meaningful for Stop mode. If `--force` is supplied alongside `clean` or Start mode, ignore it silently.
 
 ## Architecture
 
@@ -71,23 +68,16 @@ There are no per-PR locks, no cluster claims, no clustering pass, and no second 
 
 If the remaining text is `stop` (case-insensitive):
 
-PID files and lockdirs are scoped by both repository and PR number. The convention is `babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid` and `dispatch-lock-<REPO_SAFE>-<PR_NUMBER>.d`, where `<REPO_SAFE>` is `owner/repo` with every `/` replaced by `__`. This lets babysit run concurrently against PRs with the same number across different repositories.
+PID files are scoped by both repository and PR number. The convention is `babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`, where `<REPO_SAFE>` is `owner/repo` with every `/` replaced by `__`. This lets babysit run concurrently against PRs with the same number across different repositories.
 
-1. **Locate poller PID file(s):**
-   - If a repo + PR pair was discovered (see PR Detection below — Stop mode does the same auto-detect as Start mode), look at `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`.
-   - If neither a repo nor a PR can be detected (e.g., the user ran `babysit stop` from outside a repo), scan `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file and operate on each in turn.
-   - If no PID files exist at all, print: "No babysit pollers are currently running." Then stop.
+1. **Locate poller PID file(s):** Scan `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file. If no PID files exist, print: "No babysit pollers are currently running." Then stop.
 
 2. **Terminate the poller(s):** For each PID file:
-   - Read the PID with `cat`. The contents are written by `poll.sh` itself as its first action (using its own numeric `$$`), so this is always a real process id — never a harness shell-id — and `kill -TERM` will always succeed against a live poller.
+   - Read the PID with `cat`.
    - `kill -TERM <pid>` (ignore errors — the process may already have exited).
-   - Remove the PID file. (`poll.sh` also removes it on graceful exit; the explicit `rm` here covers the SIGTERM case.)
+   - Remove the PID file.
 
-3. **No other processes to terminate.** In the hybrid model `poll.sh` is the only long-running background process; there are no separate worker pools to clean up.
-
-4. **`--force` is a no-op:** Accepted for backward compatibility only.
-
-5. **Print confirmation:**
+3. **Print confirmation:**
    - "Stopped N babysit poller(s)."
 
 Then stop — do not continue to Start mode.
