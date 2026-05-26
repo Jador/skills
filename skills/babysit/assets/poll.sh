@@ -263,7 +263,7 @@ SQL
     ingested=$((ingested + 1))
     log "ingested comment_thread event_id=$root_id"
   done <<< "$events"
-  (( ingested > 0 )) && log "poll_comments: $ingested new comment thread(s) buffered"
+  if (( ingested > 0 )); then log "poll_comments: $ingested new comment thread(s) buffered"; fi
 }
 
 ###############################################################################
@@ -319,7 +319,7 @@ poll_builds() {
     ingested=$((ingested + 1))
     log "ingested build_failure build=$build_num"
   done <<< "$events"
-  (( ingested > 0 )) && log "poll_builds: $ingested new build failure(s) buffered"
+  if (( ingested > 0 )); then log "poll_builds: $ingested new build failure(s) buffered"; fi
 }
 
 ###############################################################################
@@ -439,7 +439,7 @@ SQL
   printf '%s' "$prompt" | BABYSIT_STATE_DB="$STATE_DB" \
     CLAUDE_SKILL_DIR="$CLAUDE_SKILL_DIR" \
     claude -p \
-      --permission-mode acceptEdits \
+      --permission-mode auto \
       --output-format stream-json \
       --verbose \
       --max-budget-usd 50 \
