@@ -80,6 +80,16 @@ if [[ -z "$PR" || -z "$BRANCH" ]]; then
   exit 1
 fi
 
+# gh can return the literal string "null" or other non-numeric values
+# when a field is missing or the response shape changes. Without this
+# guard, --argjson pr "$PR" would later feed jq a non-numeric arg and
+# the filter would fail; `|| return 0` swallowing the failure would
+# then make poll_comments / poll_builds silently no-op forever.
+if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
+  echo '{"type":"error","kind":"init","pr":null,"message":"Detected PR value is not numeric: '"$PR"'"}'
+  exit 1
+fi
+
 # Builds were nominally enabled but no pipeline was passed — refuse to
 # start a poller that would silently never check CI. Better to fail loud
 # now than to silently miss every build failure for the session lifetime.
@@ -194,15 +204,20 @@ poll_comments() {
   # Dedup is per-comment (not per-thread) so follow-up comments on a thread
   # whose root was already emitted still surface as new events.
   local seen_json
-  # `|| seen_json=""` guards against transient sqlite3 failures
-  # (concurrent VACUUM, busy timeout): set -e would otherwise propagate
-  # the non-zero exit out of the command substitution and kill the
-  # poller. An empty seen_json safely degrades to "treat everything as
-  # new" for this one cycle.
-  seen_json=$(db_query <<SQL || seen_json=""
+  # Guard against transient sqlite3 failures (busy timeout, concurrent
+  # VACUUM): if the read fails, discard whatever partial stdout the CLI
+  # streamed and degrade to "treat everything as new" for this cycle.
+  # The `||` MUST sit outside the command substitution: an inner
+  # `db_query || seen_json=""` only sets a subshell-local variable, and
+  # the outer assignment still captures whatever stdout sqlite3
+  # produced before failing (often a partial row stream that would
+  # silently corrupt the dedup set for this cycle).
+  if ! seen_json=$(db_query <<SQL
 SELECT event_id FROM seen_events WHERE repo = '$REPO' AND pr = $PR AND kind = 'comment';
 SQL
-)
+); then
+    seen_json=""
+  fi
   local seen_array
   if [[ -z "$seen_json" ]]; then
     seen_array="[]"
@@ -325,11 +340,14 @@ poll_builds() {
   # Pull the set of already-seen build-failure event_ids from seen_events.
   # event_id = build_number (stored as TEXT in seen_events).
   local seen_json
-  # See poll_comments for the rationale on `|| seen_json=""`.
-  seen_json=$(db_query <<SQL || seen_json=""
+  # See poll_comments for why the `||` rescue must wrap the assignment
+  # rather than live inside the command substitution.
+  if ! seen_json=$(db_query <<SQL
 SELECT event_id FROM seen_events WHERE repo = '$REPO' AND pr = $PR AND kind = 'build_failure';
 SQL
-)
+); then
+    seen_json=""
+  fi
   local seen_array
   if [[ -z "$seen_json" ]]; then
     seen_array="[]"

@@ -97,6 +97,27 @@ def test_init_error_when_repo_undetected_carries_pr_null(plugin_data: Path,
     assert "Failed to detect repository" in payload["message"]
 
 
+def test_init_error_when_pr_value_is_non_numeric(plugin_data: Path,
+                                                 tmp_path: Path):
+    # gh can return the literal "null" or another non-integer string
+    # when its response shape changes. Without an explicit numeric
+    # guard, that value flows into jq --argjson pr "$PR" later in the
+    # poll cycle, jq exits non-zero, `|| return 0` swallows it, and
+    # poll_comments/poll_builds silently emit nothing for the rest of
+    # the session.
+    bin_dir = tmp_path / "bin"
+    _write_fake_gh(bin_dir, pr="null")  # type: ignore[arg-type]
+
+    result = _run_poll(env_extra=_base_env(plugin_data, bin_dir))
+    assert result.returncode == 1
+    line = result.stdout.strip().splitlines()[0]
+    payload = json.loads(line)
+    assert payload["type"] == "error"
+    assert payload["kind"] == "init"
+    assert payload["pr"] is None
+    assert "not numeric" in payload["message"]
+
+
 def test_init_error_when_pipeline_missing_carries_pr_int(plugin_data: Path,
                                                          tmp_path: Path):
     bin_dir = tmp_path / "bin"
