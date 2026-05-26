@@ -2,10 +2,12 @@
 
 Behavioural contract under test:
 
-``list_distinct_prs(conn) -> list[int]``:
+``list_distinct_prs(conn) -> list[dict]``:
 1. Empty DB returns ``[]``.
-2. Returns distinct PR numbers from ``seen_events``, sorted ascending.
-3. Duplicates collapsed (a PR with multiple seen rows shows once).
+2. Returns distinct ``(repo, pr)`` pairs from ``seen_events`` as dicts
+   with keys ``repo`` and ``pr``, sorted ascending by (repo, pr).
+3. Duplicates collapsed (a pair with multiple seen rows shows once).
+4. Same PR number across two repos surfaces as two distinct entries.
 
 ``vacuum(conn) -> None``:
 1. Callable on a fresh schema-only DB without error.
@@ -23,10 +25,11 @@ from skills.babysit.assets.db import (
 )
 
 
-def _seed_seen(conn, pr, kind, event_id, ts="2026-05-22T09:00:00Z"):
+def _seed_seen(conn, repo, pr, kind, event_id, ts="2026-05-22T09:00:00Z"):
     conn.execute(
-        "INSERT INTO seen_events (pr, kind, event_id, ts) VALUES (?, ?, ?, ?)",
-        (pr, kind, event_id, ts),
+        "INSERT INTO seen_events (repo, pr, kind, event_id, ts) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (repo, pr, kind, event_id, ts),
     )
 
 
@@ -37,24 +40,44 @@ def test_list_distinct_prs_empty_db_returns_empty_list(conn):
 
 
 def test_list_distinct_prs_returns_sorted_ascending(conn):
-    _seed_seen(conn, 99, "comment_thread", "e1")
-    _seed_seen(conn, 7, "ci_failure", "e2")
-    _seed_seen(conn, 42, "comment_thread", "e3")
+    _seed_seen(conn, "org-a/foo", 99, "comment_thread", "e1")
+    _seed_seen(conn, "org-a/foo", 7, "ci_failure", "e2")
+    _seed_seen(conn, "org-a/foo", 42, "comment_thread", "e3")
     conn.commit()
 
-    assert list_distinct_prs(conn) == [7, 42, 99]
+    assert list_distinct_prs(conn) == [
+        {"repo": "org-a/foo", "pr": 7},
+        {"repo": "org-a/foo", "pr": 42},
+        {"repo": "org-a/foo", "pr": 99},
+    ]
 
 
 def test_list_distinct_prs_collapses_duplicates(conn):
-    # Same PR appears across multiple kinds/event_ids — must appear once.
-    _seed_seen(conn, 42, "comment_thread", "e1")
-    _seed_seen(conn, 42, "comment_thread", "e2")
-    _seed_seen(conn, 42, "ci_failure", "e3")
-    _seed_seen(conn, 7, "comment_thread", "e4")
-    _seed_seen(conn, 7, "comment_thread", "e5")
+    # Same (repo, pr) appears across multiple kinds/event_ids — must
+    # appear once.
+    _seed_seen(conn, "org-a/foo", 42, "comment_thread", "e1")
+    _seed_seen(conn, "org-a/foo", 42, "comment_thread", "e2")
+    _seed_seen(conn, "org-a/foo", 42, "ci_failure", "e3")
+    _seed_seen(conn, "org-a/foo", 7, "comment_thread", "e4")
+    _seed_seen(conn, "org-a/foo", 7, "comment_thread", "e5")
     conn.commit()
 
-    assert list_distinct_prs(conn) == [7, 42]
+    assert list_distinct_prs(conn) == [
+        {"repo": "org-a/foo", "pr": 7},
+        {"repo": "org-a/foo", "pr": 42},
+    ]
+
+
+def test_list_distinct_prs_separates_same_pr_across_repos(conn):
+    # Same PR number in two repos must produce two distinct entries.
+    _seed_seen(conn, "org-a/foo", 42, "comment", "e1")
+    _seed_seen(conn, "org-b/bar", 42, "comment", "e2")
+    conn.commit()
+
+    assert list_distinct_prs(conn) == [
+        {"repo": "org-a/foo", "pr": 42},
+        {"repo": "org-b/bar", "pr": 42},
+    ]
 
 
 # ---------- vacuum ----------
@@ -68,6 +91,7 @@ def test_vacuum_on_db_with_rows(conn):
     # Use the seen_events op to write rows, then VACUUM.
     insert_seen_event(
         conn,
+        repo="org-a/foo",
         pr=42,
         kind="comment_thread",
         event_id="e1",
@@ -75,6 +99,7 @@ def test_vacuum_on_db_with_rows(conn):
     )
     insert_seen_event(
         conn,
+        repo="org-a/foo",
         pr=7,
         kind="ci_failure",
         event_id="e2",

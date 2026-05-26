@@ -62,6 +62,32 @@ DROP INDEX IF EXISTS idx_pending_events_pr;
 SQL
 fi
 
+# v2->v3 column upgrade: seen_events gained a `repo` column in its primary key
+# so PR numbers cannot collide across repos. If the existing table predates
+# that change, rebuild it and stamp legacy rows with the 'legacy/unknown'
+# sentinel repo. CREATE IF NOT EXISTS in schema.sql is a no-op when the old
+# table is still present, so this branch is the only place the upgrade runs.
+# Idempotent: on v3 databases the pragma check returns 1 and the body skips.
+has_repo=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM pragma_table_info('seen_events') WHERE name='repo';")
+if [[ "$has_repo" == "0" ]]; then
+    sqlite3 "$DB_FILE" <<'SQL' >/dev/null
+BEGIN;
+ALTER TABLE seen_events RENAME TO seen_events_v2;
+CREATE TABLE seen_events (
+    repo TEXT,
+    pr INT,
+    kind TEXT,
+    event_id TEXT,
+    ts TEXT,
+    PRIMARY KEY (repo, pr, kind, event_id)
+);
+INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts)
+    SELECT 'legacy/unknown', pr, kind, event_id, ts FROM seen_events_v2;
+DROP TABLE seen_events_v2;
+COMMIT;
+SQL
+fi
+
 # v2->v3: also remove orphan filesystem artifacts from the old dispatcher
 # (per-burst dispatch logs, per-PR dispatch lockdirs). v3 never reads these;
 # leaving them around just clutters the data dir. Globs are no-ops if nothing
@@ -157,7 +183,7 @@ for dir in "${LEGACY_DIRS[@]}"; do
                     [[ -z "$id" ]] && continue
                     # SQL-escape single quotes.
                     id_esc="${id//\'/\'\'}"
-                    echo "INSERT OR IGNORE INTO seen_events (pr, kind, event_id, ts) VALUES (${pr}, 'comment', '${id_esc}', '${NOW_TS}');"
+                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'comment', '${id_esc}', '${NOW_TS}');"
                 done <<< "$ids"
             fi
         done
@@ -177,7 +203,7 @@ for dir in "${LEGACY_DIRS[@]}"; do
                 while IFS= read -r id; do
                     [[ -z "$id" ]] && continue
                     id_esc="${id//\'/\'\'}"
-                    echo "INSERT OR IGNORE INTO seen_events (pr, kind, event_id, ts) VALUES (${pr}, 'build', '${id_esc}', '${NOW_TS}');"
+                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'build', '${id_esc}', '${NOW_TS}');"
                 done <<< "$ids"
             fi
         done

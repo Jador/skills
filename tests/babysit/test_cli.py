@@ -8,9 +8,11 @@ Behavioural contract under test:
    with a ``DB path not provided`` error JSON.
 3. ``--db`` overrides ``BABYSIT_STATE_DB`` when both are set.
 4. ``BABYSIT_STATE_DB`` is honoured when ``--db`` is absent.
-5. ``purge_pr`` returns the seen_events delete count dict.
+5. ``purge_pr`` returns the seen_events delete count dict and is
+   repo-scoped.
 6. ``vacuum`` returns ``{"ok": true}``.
-7. ``list_distinct_prs`` returns the sorted distinct PRs array.
+7. ``list_distinct_prs`` returns the sorted distinct (repo, pr) pairs as
+   dicts.
 
 The CLI is invoked via ``subprocess.run([sys.executable, db_py, ...])`` so
 the tests exercise the real ``if __name__ == "__main__"`` entrypoint, not
@@ -76,6 +78,7 @@ def test_insert_seen_returns_rowcount_one_on_new_row(db_file: Path):
     result = _run([
         "insert_seen",
         "--db", str(db_file),
+        "--repo", "org-a/foo",
         "--pr", "123",
         "--kind", "comment_thread",
         "--event-id", "evt-1",
@@ -89,17 +92,20 @@ def test_insert_seen_returns_rowcount_one_on_new_row(db_file: Path):
     connection = sqlite3.connect(str(db_file))
     try:
         row = connection.execute(
-            "SELECT pr, kind, event_id, ts FROM seen_events WHERE pr = 123"
+            "SELECT repo, pr, kind, event_id, ts FROM seen_events "
+            "WHERE pr = 123"
         ).fetchone()
     finally:
         connection.close()
-    assert row == (123, "comment_thread", "evt-1", "2026-05-22T10:00:00Z")
+    assert row == ("org-a/foo", 123, "comment_thread", "evt-1",
+                   "2026-05-22T10:00:00Z")
 
 
 def test_insert_seen_dedup_returns_rowcount_zero(db_file: Path):
     args = [
         "insert_seen",
         "--db", str(db_file),
+        "--repo", "org-a/foo",
         "--pr", "7",
         "--kind", "comment_thread",
         "--event-id", "evt-dup",
@@ -112,6 +118,24 @@ def test_insert_seen_dedup_returns_rowcount_zero(db_file: Path):
     second = _run(args)
     assert second.returncode == 0, second.stderr
     assert json.loads(second.stdout) == {"ok": True, "rows_affected": 0}
+
+
+def test_insert_seen_same_pr_different_repos_coexist(db_file: Path):
+    base = [
+        "insert_seen",
+        "--db", str(db_file),
+        "--pr", "42",
+        "--kind", "comment",
+        "--event-id", "999",
+        "--ts", "2026-05-22T10:00:00Z",
+    ]
+    first = _run([*base, "--repo", "org-a/foo"])
+    second = _run([*base, "--repo", "org-b/bar"])
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert json.loads(first.stdout) == {"ok": True, "rows_affected": 1}
+    assert json.loads(second.stdout) == {"ok": True, "rows_affected": 1}
 
 
 # ---------- missing --db and no env var ----------
@@ -140,6 +164,7 @@ def test_db_flag_overrides_env_var(tmp_path: Path):
         [
             "insert_seen",
             "--db", str(flag_db),
+            "--repo", "org-a/foo",
             "--pr", "1",
             "--kind", "comment_thread",
             "--event-id", "e1",
@@ -172,6 +197,7 @@ def test_env_var_used_when_db_flag_absent(tmp_path: Path):
     result = _run(
         [
             "insert_seen",
+            "--repo", "org-a/foo",
             "--pr", "2",
             "--kind", "comment_thread",
             "--event-id", "e2",
@@ -191,19 +217,54 @@ def test_purge_pr_returns_seen_events_count(db_file: Path):
     _run([
         "insert_seen",
         "--db", str(db_file),
+        "--repo", "org-a/foo",
         "--pr", "55",
         "--kind", "comment_thread",
         "--event-id", "e1",
         "--ts", "2026-05-22T10:00:00Z",
     ])
 
-    result = _run(["purge_pr", "--db", str(db_file), "--pr", "55"])
+    result = _run([
+        "purge_pr", "--db", str(db_file),
+        "--repo", "org-a/foo", "--pr", "55",
+    ])
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
     assert out["ok"] is True
     counts = out["counts"]
     # Only seen_events is reported under the trimmed surface.
     assert counts == {"seen_events": 1}
+
+
+def test_purge_pr_repo_scoped(db_file: Path):
+    # Two repos, same PR. Purging one must leave the other intact.
+    for repo in ("org-a/foo", "org-b/bar"):
+        _run([
+            "insert_seen",
+            "--db", str(db_file),
+            "--repo", repo,
+            "--pr", "42",
+            "--kind", "comment",
+            "--event-id", "999",
+            "--ts", "2026-05-22T10:00:00Z",
+        ])
+
+    result = _run([
+        "purge_pr", "--db", str(db_file),
+        "--repo", "org-a/foo", "--pr", "42",
+    ])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "ok": True, "counts": {"seen_events": 1},
+    }
+
+    c = sqlite3.connect(str(db_file))
+    try:
+        assert c.execute(
+            "SELECT COUNT(*) FROM seen_events WHERE repo = 'org-b/bar'"
+        ).fetchone()[0] == 1
+    finally:
+        c.close()
 
 
 # ---------- vacuum ----------
@@ -217,12 +278,17 @@ def test_vacuum_returns_ok(db_file: Path):
 
 # ---------- list_distinct_prs ----------
 
-def test_list_distinct_prs_returns_prs_array(db_file: Path):
+def test_list_distinct_prs_returns_pairs_array(db_file: Path):
     # Seed via the CLI itself so we exercise the round trip.
-    for pr, eid in [(42, "e1"), (7, "e2")]:
+    for repo, pr, eid in [
+        ("org-a/foo", 42, "e1"),
+        ("org-a/foo", 7, "e2"),
+        ("org-b/bar", 42, "e3"),
+    ]:
         _run([
             "insert_seen",
             "--db", str(db_file),
+            "--repo", repo,
             "--pr", str(pr),
             "--kind", "comment_thread",
             "--event-id", eid,
@@ -232,7 +298,14 @@ def test_list_distinct_prs_returns_prs_array(db_file: Path):
     result = _run(["list_distinct_prs", "--db", str(db_file)])
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
-    assert out == {"ok": True, "prs": [7, 42]}
+    assert out == {
+        "ok": True,
+        "prs": [
+            {"repo": "org-a/foo", "pr": 7},
+            {"repo": "org-a/foo", "pr": 42},
+            {"repo": "org-b/bar", "pr": 42},
+        ],
+    }
 
 
 def test_list_distinct_prs_empty_db_returns_empty(db_file: Path):

@@ -64,7 +64,7 @@ Babysit is a hybrid observer + session pattern with three roles:
 3. **Sub-agent workers.** Invoked via the `Agent` tool with the worker prompts at `assets/comment-check-prompt.md` and `assets/build-check-prompt.md`. They read the event payload from their prompt, take action against the PR, and return free-form text. They do **not** write to `seen_events` or any other DB table.
 
 **State.** Single SQLite DB at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. All writes go through `db.py` (Python sqlite3 with `?` bound params and `with conn:` transactions). The schema has two tables:
-- `seen_events` — dedup ledger keyed by event identity (comment id, build number). Written only by `poll.sh`.
+- `seen_events` — dedup ledger keyed by `(repo, pr, kind, event_id)`. The `repo` column scopes every row so the same PR number across two repos never collides. Written only by `poll.sh`.
 - `pipelines` — Buildkite pipeline slug per `owner/repo`. Written once during Start mode pipeline detection; read on subsequent runs.
 
 There are no per-PR locks and no second long-running LLM process spawned by `poll.sh`. Everything that requires the LLM happens inside your session or inside the worker sub-agents you spawn.
@@ -109,41 +109,46 @@ If `--dry-run` was specified, print a banner first:
 
 1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, skip steps 2–5 (DB cleanup) but still run steps 6–7 (filesystem sweeps). If both the DB is missing AND no stale filesystem artifacts are found, print: "No babysit state found." Then stop.
 
-2. **Collect tracked PRs:** Ask the CLI for every PR ever recorded in `seen_events`:
+2. **Collect tracked (repo, PR) pairs:** Ask the CLI for every (repo, PR) pair ever recorded in `seen_events`:
    ```
    python3 "${CLAUDE_SKILL_DIR}/assets/db.py" list_distinct_prs \
        --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"
    ```
-   The CLI prints one JSON object on stdout of the shape `{"ok": true, "prs": [<pr>, ...]}`. Extract the PR numbers with `jq -r '.prs[]'`. If the array is empty, skip to step 6.
+   The CLI prints one JSON object on stdout of the shape `{"ok": true, "prs": [{"repo": "<owner/repo>", "pr": <pr>}, ...]}`. Extract the pairs with `jq -c '.prs[]'`. If the array is empty, skip to step 6.
 
-3. **Check each PR's GitHub state:** For each unique PR number, run:
+   Rows with the sentinel repo `legacy/unknown` are pre-v3 imports whose origin repo was not preserved. They are surfaced like any other pair — the GitHub state check below will fail with "Could not resolve" and they will be purged in step 4.
+
+3. **Check each pair's GitHub state:** For each `(repo, pr)` pair, run:
    ```
-   gh pr view <PR_NUMBER> --json state --jq .state 2>/tmp/babysit-gh-err.$$
+   gh pr view <PR_NUMBER> --repo <REPO> --json state --jq .state 2>/tmp/babysit-gh-err.$$
    ```
+   `--repo` is mandatory here — without it, `gh` resolves against the current working directory and a wrong-cwd invocation would misclassify every pair.
+
    Capture both the stdout (the state string) and the exit code (`$?`).
 
-   Classify each PR as follows:
+   Classify each pair as follows:
    - Exit code `0` and stdout is `OPEN`: **preserve** (still open).
    - Exit code `0` and stdout is `MERGED` or `CLOSED`: **mark for purge**.
-   - Non-zero exit code AND the stderr file mentions "Could not resolve" or "no pull requests found" (i.e., the PR no longer exists / 404): **mark for purge**.
-   - Non-zero exit code with any other stderr (network blip, auth error, rate limit): print "could not determine state for PR <PR_NUMBER>; skipping" and **do not purge** this PR.
+   - Non-zero exit code AND the stderr file mentions "Could not resolve" or "no pull requests found" (i.e., the PR no longer exists / 404 / sentinel repo): **mark for purge**.
+   - Non-zero exit code with any other stderr (network blip, auth error, rate limit): print "could not determine state for <REPO>#<PR_NUMBER>; skipping" and **do not purge** this pair.
 
    Clean up `/tmp/babysit-gh-err.$$` after each check.
 
-4. **Purge marked PRs:** For each PR marked for purge:
+4. **Purge marked pairs:** For each pair marked for purge:
    - Print the intended deletes, e.g.:
      ```
-     Would purge PR #<PR_NUMBER> (<state>): rows from seen_events
+     Would purge <REPO>#<PR_NUMBER> (<state>): rows from seen_events
      ```
-   - If `--dry-run` was specified, **skip the CLI call** — the line above is the only output for this PR.
+   - If `--dry-run` was specified, **skip the CLI call** — the line above is the only output for this pair.
    - If `--dry-run` was NOT specified, delegate the purge to `db.py`:
      ```
      python3 "${CLAUDE_SKILL_DIR}/assets/db.py" purge_pr \
          --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db" \
+         --repo <REPO> \
          --pr <PR_NUMBER>
      ```
-     The CLI deletes the PR's rows from `seen_events` in a single transaction and prints `{"ok": true, "counts": {...}}`. Then report: "Purged PR #<PR_NUMBER> (<state>)."
-   - For preserved PRs, report: "Preserved PR #<PR_NUMBER> (still open)."
+     The CLI deletes that pair's rows from `seen_events` in a single transaction and prints `{"ok": true, "counts": {...}}`. Then report: "Purged <REPO>#<PR_NUMBER> (<state>)."
+   - For preserved pairs, report: "Preserved <REPO>#<PR_NUMBER> (still open)."
 
 5. **Vacuum:** If `--dry-run` was specified, **skip this step entirely**. Otherwise reclaim space:
    ```

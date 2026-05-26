@@ -5,11 +5,12 @@
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS seen_events (
+    repo TEXT,
     pr INT,
     kind TEXT,
     event_id TEXT,
     ts TEXT,
-    PRIMARY KEY (pr, kind, event_id)
+    PRIMARY KEY (repo, pr, kind, event_id)
 );
 
 CREATE TABLE IF NOT EXISTS pipelines (

@@ -171,7 +171,7 @@ poll_comments() {
   # whose root was already emitted still surface as new events.
   local seen_json
   seen_json=$(db_query <<SQL
-SELECT event_id FROM seen_events WHERE pr = $PR AND kind = 'comment';
+SELECT event_id FROM seen_events WHERE repo = '$REPO' AND pr = $PR AND kind = 'comment';
 SQL
 )
   local seen_array
@@ -246,6 +246,7 @@ SQL
       [[ -z "$cid" ]] && continue
       python3 "$DB_PY" insert_seen \
         --db "$STATE_DB" \
+        --repo "$REPO" \
         --pr "$PR" \
         --kind "comment" \
         --event-id "$cid" \
@@ -279,7 +280,7 @@ poll_builds() {
   # event_id = build_number (stored as TEXT in seen_events).
   local seen_json
   seen_json=$(db_query <<SQL
-SELECT event_id FROM seen_events WHERE pr = $PR AND kind = 'build_failure';
+SELECT event_id FROM seen_events WHERE repo = '$REPO' AND pr = $PR AND kind = 'build_failure';
 SQL
 )
   local seen_array
@@ -320,6 +321,7 @@ SQL
     printf '%s\n' "$evt"
     python3 "$DB_PY" insert_seen \
       --db "$STATE_DB" \
+      --repo "$REPO" \
       --pr "$PR" \
       --kind "build_failure" \
       --event-id "$build_num" \
@@ -341,7 +343,7 @@ while true; do
   poll_comments
   poll_builds
   # Cheap status snapshot once per cycle.
-  seen_count=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM seen_events WHERE pr=$PR" 2>/dev/null || echo 0)
+  seen_count=$(sqlite3 "$STATE_DB" "SELECT COUNT(*) FROM seen_events WHERE repo='$REPO' AND pr=$PR" 2>/dev/null || echo 0)
   log "cycle $CYCLE end — seen=$seen_count sleep=${INTERVAL}s"
   sleep "$INTERVAL"
 done

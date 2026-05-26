@@ -1,7 +1,7 @@
 """babysit DB helper — single source of truth for SQL writes.
 
-All operations take an open sqlite3.Connection. The CLI in __main__ (added
-later) wraps these for shell callers.
+All operations take an open sqlite3.Connection. The CLI in __main__
+wraps these for shell callers.
 """
 from __future__ import annotations
 import json
@@ -10,6 +10,7 @@ import sqlite3
 
 def insert_seen_event(
     conn: sqlite3.Connection,
+    repo: str,
     pr: int,
     kind: str,
     event_id: str,
@@ -19,32 +20,43 @@ def insert_seen_event(
 
     Used by poll.sh to dedupe events: a rowcount of 1 means this is a new
     event the session has not yet seen; 0 means it was already recorded.
+    Repo-scoped so the same PR number across different repos cannot collide.
     """
     with conn:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO seen_events (pr, kind, event_id, ts) "
-            "VALUES (?, ?, ?, ?)",
-            (pr, kind, event_id, ts),
+            "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (repo, pr, kind, event_id, ts),
         )
     return cur.rowcount
 
 
-def purge_pr(conn: sqlite3.Connection, pr: int) -> dict:
-    """Delete every trace of one PR from seen_events.
+def purge_pr(conn: sqlite3.Connection, repo: str, pr: int) -> dict:
+    """Delete every trace of one (repo, PR) pair from seen_events.
 
-    Returns per-table delete counts.
+    Returns per-table delete counts. Scoped by repo so purging PR #42 in
+    org-a/foo never touches PR #42 in org-b/bar.
     """
     counts = {}
     with conn:
-        cur = conn.execute("DELETE FROM seen_events WHERE pr = ?", (pr,))
+        cur = conn.execute(
+            "DELETE FROM seen_events WHERE repo = ? AND pr = ?",
+            (repo, pr),
+        )
         counts["seen_events"] = cur.rowcount
     return counts
 
 
-def list_distinct_prs(conn: sqlite3.Connection) -> list[int]:
-    """Distinct PR numbers ever recorded in seen_events, sorted asc."""
-    cur = conn.execute("SELECT DISTINCT pr FROM seen_events ORDER BY pr ASC")
-    return [row["pr"] if hasattr(row, "keys") else row[0] for row in cur.fetchall()]
+def list_distinct_prs(conn: sqlite3.Connection) -> list[dict]:
+    """Distinct (repo, pr) pairs ever recorded in seen_events.
+
+    Sorted ascending by (repo, pr). Returns list of dicts so the CLI JSON
+    output retains both fields.
+    """
+    cur = conn.execute(
+        "SELECT DISTINCT repo, pr FROM seen_events ORDER BY repo ASC, pr ASC"
+    )
+    return [{"repo": row[0], "pr": row[1]} for row in cur.fetchall()]
 
 
 def vacuum(conn: sqlite3.Connection) -> None:
@@ -79,6 +91,7 @@ def _build_parser():
 
     sp = sub.add_parser("insert_seen")
     _add_db(sp)
+    sp.add_argument("--repo", required=True)
     sp.add_argument("--pr", type=int, required=True)
     sp.add_argument("--kind", required=True)
     sp.add_argument("--event-id", required=True)
@@ -86,6 +99,7 @@ def _build_parser():
 
     sp = sub.add_parser("purge_pr")
     _add_db(sp)
+    sp.add_argument("--repo", required=True)
     sp.add_argument("--pr", type=int, required=True)
 
     sp = sub.add_parser("list_distinct_prs")
@@ -104,6 +118,7 @@ def _dispatch(args, conn):
     if op == "insert_seen":
         n = insert_seen_event(
             conn,
+            repo=args.repo,
             pr=args.pr,
             kind=args.kind,
             event_id=args.event_id,
@@ -112,7 +127,7 @@ def _dispatch(args, conn):
         return {"ok": True, "rows_affected": n}
 
     if op == "purge_pr":
-        counts = purge_pr(conn, pr=args.pr)
+        counts = purge_pr(conn, repo=args.repo, pr=args.pr)
         return {"ok": True, "counts": counts}
 
     if op == "list_distinct_prs":
