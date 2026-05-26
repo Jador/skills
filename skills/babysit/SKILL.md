@@ -35,7 +35,7 @@ Parse `$ARGUMENTS` to determine the mode of operation. Before mode detection, ex
 
 - `--no-comments` — disables comment monitoring
 - `--no-builds` — disables build monitoring
-- `--dry-run` — (Clean mode only) print intended deletions and stale-cluster reaps without modifying the filesystem or database
+- `--dry-run` — (Clean mode only) print intended deletions without modifying the filesystem or database
 
 Strip these flags from `$ARGUMENTS` before proceeding with mode detection below. The remaining text (after flag removal and trimming whitespace) is used for mode selection.
 
@@ -47,7 +47,7 @@ The `--dry-run` flag is only meaningful for Clean mode. If `--dry-run` is suppli
 
 Babysit is a hybrid observer + session pattern with three roles:
 
-1. **`assets/poll.sh` — read-only observer.** Runs as a background process per monitored PR (launched via the Bash tool's `run_in_background: true` parameter — a backgrounded shell, **not** a `TaskCreate` Task; the harness's `TaskList` cannot see it). On each cycle it polls GitHub for new review comments and Buildkite for failed builds, dedupes against the `seen_events` table, and emits one JSON event per unseen item to its stdout. It is the **single writer** to `seen_events`; nothing else touches that table. It does no clustering, holds no locks, and spawns no workers.
+1. **`assets/poll.sh` — read-only observer.** Runs as a background process per monitored PR (launched via the Bash tool's `run_in_background: true` parameter — a backgrounded shell, **not** a `TaskCreate` Task; the harness's `TaskList` cannot see it). On each cycle it polls GitHub for new review comments and Buildkite for failed builds, dedupes against the `seen_events` table, and emits one JSON event per unseen item to its stdout. It is the **single writer** to `seen_events`; nothing else touches that table. It holds no locks and spawns no workers.
 
 2. **Your user session — event reader.** After Start mode launches `poll.sh`, you use the Monitor tool to stream stdout from the backgrounded shell. Each stdout line is one of these JSON event shapes:
    - `{"type":"comment_thread","pr":...,"thread_root_id":...,"comments":[...],"file":...,"line":...,"diff_hunk":...}`
@@ -62,7 +62,7 @@ Babysit is a hybrid observer + session pattern with three roles:
 - `seen_events` — dedup ledger keyed by event identity (comment id, build number). Written only by `poll.sh`.
 - `pipelines` — Buildkite pipeline slug per `owner/repo`. Written once during Start mode pipeline detection; read on subsequent runs.
 
-There are no per-PR locks, no cluster claims, no clustering pass, and no second long-running LLM process spawned by `poll.sh`. Everything that requires the LLM happens inside your session or inside the worker sub-agents you spawn.
+There are no per-PR locks and no second long-running LLM process spawned by `poll.sh`. Everything that requires the LLM happens inside your session or inside the worker sub-agents you spawn.
 
 ### Mode: Stop
 
@@ -94,14 +94,14 @@ If `--dry-run` was specified, print a banner first:
 === DRY RUN — no changes will be written ===
 ```
 
-1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, skip steps 2–6 (DB cleanup) but still run steps 7–9 (filesystem sweeps). If both the DB is missing AND no stale filesystem artifacts are found, print: "No babysit state found." Then stop.
+1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, skip steps 2–5 (DB cleanup) but still run steps 6–7 (filesystem sweeps). If both the DB is missing AND no stale filesystem artifacts are found, print: "No babysit state found." Then stop.
 
 2. **Collect tracked PRs:** Ask the CLI for every PR ever recorded in `seen_events`:
    ```
    python3 "${CLAUDE_SKILL_DIR}/assets/db.py" list_distinct_prs \
        --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"
    ```
-   The CLI prints one JSON object on stdout of the shape `{"ok": true, "prs": [<pr>, ...]}`. Extract the PR numbers with `jq -r '.prs[]'`. If the array is empty, skip to step 7.
+   The CLI prints one JSON object on stdout of the shape `{"ok": true, "prs": [<pr>, ...]}`. Extract the PR numbers with `jq -r '.prs[]'`. If the array is empty, skip to step 6.
 
 3. **Check each PR's GitHub state:** For each unique PR number, run:
    ```
@@ -120,36 +120,35 @@ If `--dry-run` was specified, print a banner first:
 4. **Purge marked PRs:** For each PR marked for purge:
    - Print the intended deletes, e.g.:
      ```
-     Would purge PR #<PR_NUMBER> (<state>): rows from seen_events, worker_reports, clusters, pending_events
+     Would purge PR #<PR_NUMBER> (<state>): rows from seen_events
      ```
    - If `--dry-run` was specified, **skip the CLI call** — the line above is the only output for this PR.
-   - If `--dry-run` was NOT specified, delegate the transactional 4-table purge to `db.py`:
+   - If `--dry-run` was NOT specified, delegate the purge to `db.py`:
      ```
      python3 "${CLAUDE_SKILL_DIR}/assets/db.py" purge_pr \
          --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db" \
          --pr <PR_NUMBER>
      ```
-     The CLI runs all four `DELETE`s in a single transaction and prints `{"ok": true, "counts": {...}}`. Then report: "Purged PR #<PR_NUMBER> (<state>)."
+     The CLI deletes the PR's rows from `seen_events` in a single transaction and prints `{"ok": true, "counts": {...}}`. Then report: "Purged PR #<PR_NUMBER> (<state>)."
    - For preserved PRs, report: "Preserved PR #<PR_NUMBER> (still open)."
 
-5. **(Removed in the hybrid model.)** This step previously reaped stale rows from a `clusters` table that no longer exists. Task 8 will renumber subsequent steps.
-
-6. **Vacuum:** If `--dry-run` was specified, **skip this step entirely**. Otherwise reclaim space:
+5. **Vacuum:** If `--dry-run` was specified, **skip this step entirely**. Otherwise reclaim space:
    ```
    python3 "${CLAUDE_SKILL_DIR}/assets/db.py" vacuum \
        --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"
    ```
 
-7. **(Removed in the hybrid model.)** This step previously swept lockdirs that no longer exist (the hybrid model uses no per-PR locks).
+6. **Sweep old poll logs:** Remove stale `poll-*.log` files under `${CLAUDE_PLUGIN_DATA}/babysit/` with mtime older than 7 days:
+   - `find "${CLAUDE_PLUGIN_DATA}/babysit" -maxdepth 1 -name 'poll-*.log' -mtime +7` (the directory may not exist — skip silently if `find` reports it missing).
+   - For each match, print: "Would remove old poll log <path>."
+   - If `--dry-run` was NOT specified, `rm -f <path>`.
 
-8. **(Removed in the hybrid model.)** This step previously swept background-worker log files that no longer exist.
-
-9. **Sweep stale agent-teams orphans:** The agent-teams harness writes scratch directories under `~/.claude/teams/` and `~/.claude/tasks/` that are not cleaned up by every code path. Sweep entries with mtime older than 7 days:
+7. **Sweep stale agent-teams orphans:** The agent-teams harness writes scratch directories under `~/.claude/teams/` and `~/.claude/tasks/` that are not cleaned up by every code path. Sweep entries with mtime older than 7 days:
    - `find ~/.claude/teams -mindepth 1 -maxdepth 1 -mtime +7` and `find ~/.claude/tasks -mindepth 1 -maxdepth 1 -mtime +7` (the directories may not exist — skip silently if `find` reports them missing).
    - For each match, print: "Would remove stale agent-teams orphan <path>."
    - If `--dry-run` was NOT specified, `rm -rf <path>`.
 
-10. **Print summary:** Print a final summary block. If `--dry-run` was specified, prefix the summary with the dry-run banner repeated:
+8. **Print summary:** Print a final summary block. If `--dry-run` was specified, prefix the summary with the dry-run banner repeated:
     ```
     === DRY RUN — no changes were written ===
     ```
@@ -157,9 +156,7 @@ If `--dry-run` was specified, print a banner first:
     - Count of PRs purged (or that would be purged in dry-run)
     - Count of PRs preserved (still open)
     - Count of PRs skipped due to transient errors (if any)
-    - Count of stale clusters reaped (or that would be reaped in dry-run)
-    - Count of stale dispatch lockdirs removed
-    - Count of old background-worker logs removed
+    - Count of old poll logs removed
     - Count of stale agent-teams orphans removed
 
     Example:
@@ -168,8 +165,6 @@ If `--dry-run` was specified, print a banner first:
     - PRs purged:        3
     - PRs preserved:     2
     - PRs skipped:       0
-    - Clusters reaped:   1
-    - Lockdirs removed:  2
     - Logs removed:      14
     - Orphans removed:   5
     ```
