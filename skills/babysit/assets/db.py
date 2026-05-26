@@ -31,6 +31,38 @@ def insert_seen_event(
     return cur.rowcount
 
 
+def insert_seen_event_batch(
+    conn: sqlite3.Connection,
+    repo: str,
+    pr: int,
+    kind: str,
+    event_ids: list[str],
+    ts: str,
+) -> int:
+    """INSERT OR IGNORE multiple rows in a single transaction. Returns
+    the total number of rows actually inserted (i.e. previously unseen).
+
+    Used by poll.sh so that all event_ids belonging to one emitted event
+    are recorded atomically — either every id for the event is marked
+    seen before the worker is dispatched, or none of them are. A
+    per-row loop with one transaction per id leaves a partial-state
+    window in which the poller can be killed after marking some ids
+    seen but before emitting the event, leading later cycles to emit a
+    truncated `new_comment_ids` while treating the already-recorded
+    ids as historical context that the worker will not act on.
+    """
+    if not event_ids:
+        return 0
+    rows = [(repo, pr, kind, eid, ts) for eid in event_ids]
+    with conn:
+        cur = conn.executemany(
+            "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+    return cur.rowcount
+
+
 def purge_pr(conn: sqlite3.Connection, repo: str, pr: int) -> dict:
     """Delete every trace of one (repo, PR) pair from seen_events.
 
@@ -97,6 +129,14 @@ def _build_parser():
     sp.add_argument("--event-id", required=True)
     sp.add_argument("--ts", required=True)
 
+    sp = sub.add_parser("insert_seen_batch")
+    _add_db(sp)
+    sp.add_argument("--repo", required=True)
+    sp.add_argument("--pr", type=int, required=True)
+    sp.add_argument("--kind", required=True)
+    sp.add_argument("--event-ids", required=True, nargs="+")
+    sp.add_argument("--ts", required=True)
+
     sp = sub.add_parser("purge_pr")
     _add_db(sp)
     sp.add_argument("--repo", required=True)
@@ -122,6 +162,17 @@ def _dispatch(args, conn):
             pr=args.pr,
             kind=args.kind,
             event_id=args.event_id,
+            ts=args.ts,
+        )
+        return {"ok": True, "rows_affected": n}
+
+    if op == "insert_seen_batch":
+        n = insert_seen_event_batch(
+            conn,
+            repo=args.repo,
+            pr=args.pr,
+            kind=args.kind,
+            event_ids=args.event_ids,
             ts=args.ts,
         )
         return {"ok": True, "rows_affected": n}

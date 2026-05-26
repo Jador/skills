@@ -120,6 +120,56 @@ def test_insert_seen_dedup_returns_rowcount_zero(db_file: Path):
     assert json.loads(second.stdout) == {"ok": True, "rows_affected": 0}
 
 
+def test_insert_seen_batch_round_trip(db_file: Path):
+    result = _run([
+        "insert_seen_batch",
+        "--db", str(db_file),
+        "--repo", "org-a/foo",
+        "--pr", "42",
+        "--kind", "comment",
+        "--ts", "2026-05-22T10:00:00Z",
+        "--event-ids", "100", "101", "102",
+    ])
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out == {"ok": True, "rows_affected": 3}
+
+    connection = sqlite3.connect(str(db_file))
+    try:
+        rows = connection.execute(
+            "SELECT event_id FROM seen_events WHERE pr = 42 ORDER BY event_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert [r[0] for r in rows] == ["100", "101", "102"]
+
+
+def test_insert_seen_batch_partial_dedup(db_file: Path):
+    # Pre-seed one id; batch contains the same id plus two new ones.
+    _run([
+        "insert_seen",
+        "--db", str(db_file),
+        "--repo", "org-a/foo",
+        "--pr", "42",
+        "--kind", "comment",
+        "--event-id", "100",
+        "--ts", "2026-05-22T10:00:00Z",
+    ])
+
+    result = _run([
+        "insert_seen_batch",
+        "--db", str(db_file),
+        "--repo", "org-a/foo",
+        "--pr", "42",
+        "--kind", "comment",
+        "--ts", "2026-05-22T10:00:00Z",
+        "--event-ids", "100", "101", "102",
+    ])
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out == {"ok": True, "rows_affected": 2}
+
+
 def test_insert_seen_same_pr_different_repos_coexist(db_file: Path):
     base = [
         "insert_seen",

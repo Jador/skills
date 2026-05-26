@@ -290,9 +290,17 @@ SQL
   # crash) between emit and insert causes the same thread to re-emit on
   # restart and the worker to post duplicate replies.
   #
-  # Trade-off: if the poller dies between insert and printf, the event is
-  # lost. That is silent-drop, which is safer than duplicate worker
-  # replies on the PR.
+  # The insert MUST happen in a single transaction across every id in
+  # new_comment_ids: a per-id loop with one transaction each is
+  # interruptible mid-burst, leaving some ids marked seen and the rest
+  # to re-emit on the next cycle as a truncated event whose `comments`
+  # array still carries the partially-recorded ids as historical
+  # context the worker will not act on. db.py's insert_seen_batch
+  # commits the whole set atomically.
+  #
+  # Trade-off: if the poller dies between insert-commit and printf, the
+  # event is lost. That is silent-drop, which is safer than duplicate
+  # worker replies on the PR.
   local now emitted=0
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   while IFS= read -r evt; do
@@ -302,19 +310,22 @@ SQL
     [[ -z "$root_id" || "$root_id" == "null" ]] && continue
     new_ids=$(echo "$evt" | jq -r '.new_comment_ids[]')
     [[ -z "$new_ids" ]] && continue
+    local -a cids=()
     while IFS= read -r cid; do
       [[ -z "$cid" ]] && continue
-      python3 "$DB_PY" insert_seen \
-        --db "$STATE_DB" \
-        --repo "$REPO" \
-        --pr "$PR" \
-        --kind "comment" \
-        --event-id "$cid" \
-        --ts "$now" >/dev/null
+      cids+=("$cid")
     done <<< "$new_ids"
+    (( ${#cids[@]} == 0 )) && continue
+    python3 "$DB_PY" insert_seen_batch \
+      --db "$STATE_DB" \
+      --repo "$REPO" \
+      --pr "$PR" \
+      --kind "comment" \
+      --ts "$now" \
+      --event-ids "${cids[@]}" >/dev/null
     printf '%s\n' "$evt"
     emitted=$((emitted + 1))
-    log "emitted comment_thread thread_root_id=$root_id new=$(echo "$new_ids" | wc -l | tr -d ' ')"
+    log "emitted comment_thread thread_root_id=$root_id new=${#cids[@]}"
   done <<< "$events"
   if (( emitted > 0 )); then log "poll_comments: $emitted new comment thread(s) emitted"; fi
 }

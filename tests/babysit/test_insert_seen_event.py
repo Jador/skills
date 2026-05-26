@@ -14,7 +14,11 @@ Behavioural contract under test:
 
 from __future__ import annotations
 
-from skills.babysit.assets.db import insert_seen_event, purge_pr
+from skills.babysit.assets.db import (
+    insert_seen_event,
+    insert_seen_event_batch,
+    purge_pr,
+)
 
 
 def _count_seen(conn, **where) -> int:
@@ -113,6 +117,57 @@ def test_same_pr_different_repos_do_not_collide(conn):
     assert _count_seen(conn) == 2
     assert _count_seen(conn, repo="org-a/foo", pr=42) == 1
     assert _count_seen(conn, repo="org-b/bar", pr=42) == 1
+
+
+# ---------- insert_seen_event_batch ----------
+
+def test_batch_insert_records_all_event_ids_atomically(conn):
+    n = insert_seen_event_batch(
+        conn,
+        repo="org-a/foo",
+        pr=42,
+        kind="comment",
+        event_ids=["100", "101", "102"],
+        ts="t",
+    )
+    assert n == 3
+    rows = conn.execute(
+        "SELECT event_id FROM seen_events WHERE pr = 42 ORDER BY event_id"
+    ).fetchall()
+    assert [r[0] for r in rows] == ["100", "101", "102"]
+
+
+def test_batch_insert_is_partial_dedup_safe(conn):
+    # Pre-seed 100; batch contains 100, 101, 102. Only 101 and 102
+    # should land — INSERT OR IGNORE skips the existing key.
+    insert_seen_event(conn, repo="org-a/foo", pr=42,
+                      kind="comment", event_id="100", ts="t")
+    n = insert_seen_event_batch(
+        conn,
+        repo="org-a/foo",
+        pr=42,
+        kind="comment",
+        event_ids=["100", "101", "102"],
+        ts="t",
+    )
+    assert n == 2
+    total = conn.execute(
+        "SELECT COUNT(*) FROM seen_events WHERE pr = 42"
+    ).fetchone()[0]
+    assert total == 3
+
+
+def test_batch_insert_empty_list_is_noop(conn):
+    n = insert_seen_event_batch(
+        conn,
+        repo="org-a/foo",
+        pr=42,
+        kind="comment",
+        event_ids=[],
+        ts="t",
+    )
+    assert n == 0
+    assert _count_seen(conn) == 0
 
 
 # ---------- purge_pr clears seen_events ----------
