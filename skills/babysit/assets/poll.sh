@@ -2,16 +2,19 @@
 set -euo pipefail
 
 # poll.sh — Persistent polling loop for babysit skill.
-# Launched via the Monitor tool. Pure event collector:
+# Launched via the Monitor tool. Event collector + dispatcher launcher:
 #   - Fetches comments + failed builds via gh/bk on each cycle.
 #   - Inserts new events into the `pending_events` SQLite table (idempotent
 #     via INSERT OR IGNORE on the PRIMARY KEY).
-#   - After a 30s quiet window per PR (no new pending events), emits one
-#     `cluster_ready` JSON line on stdout so the coordinator can pick up
-#     the buffered cluster.
+#   - After a 30s quiet window per PR (no new pending events), spawns one
+#     `claude -p` headless dispatcher per burst (A2 architecture). The
+#     dispatcher (assets/dispatch-prompt.md) owns clustering, worker
+#     dispatch, and all subsequent DB writes for that burst. Single-flight
+#     per PR is enforced via acquire_dispatch_lock (Guard 1).
 #
-# The coordinator (separate process) owns reads/deletes of `pending_events`
-# and writes to `seen_events` / `clusters` / `worker_reports`.
+# The dispatcher owns reads/deletes of `pending_events` and writes to
+# `seen_events` / `clusters` / `worker_reports`. poll.sh never writes
+# those tables.
 #
 # Usage: poll.sh [<pipeline-slug>] [--no-comments] [--no-builds] [--interval N]
 
@@ -88,6 +91,23 @@ STATE_DB="${STATE_DIR}/state.db"
 ASSETS_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA_FILE="${ASSETS_DIR}/schema.sql"
 DB_PY="${ASSETS_DIR}/db.py"
+
+# CLAUDE_SKILL_DIR is normally exported by the skill harness. If not, derive
+# it from ASSETS_DIR (one level up). The dispatcher prompt references
+# ${CLAUDE_SKILL_DIR}/assets/db.py, so it must be exported to the spawned
+# `claude -p` session below.
+: "${CLAUDE_SKILL_DIR:=$(cd -- "${ASSETS_DIR}/.." && pwd)}"
+
+# Dispatch prompt template — A2 architecture (Task 5). On debounce expiry
+# with pending events, poll.sh spawns a fresh `claude -p` dispatcher per
+# burst, interpolating this file's <PLACEHOLDER>s with the current PR's
+# context. Replaces the deleted cluster_ready JSON emission.
+DISPATCH_PROMPT_FILE="${ASSETS_DIR}/dispatch-prompt.md"
+
+# Freeform instructions are set by SKILL.md when the user supplies extra
+# guidance at babysit-start. Default to "None" so the prompt is always
+# well-formed even if the harness doesn't export it.
+FREEFORM="${FREEFORM_INSTRUCTIONS:-None}"
 
 mkdir -p "$STATE_DIR"
 
@@ -260,11 +280,22 @@ poll_builds() {
 }
 
 ###############################################################################
-# Debounce: emit cluster_ready when this PR has buffered events
-# and no new arrivals within DEBOUNCE_SECONDS.
+# Debounce + dispatcher spawn.
+#
+# A2 dispatcher spawn: on debounce expiry, if no dispatcher is live for this
+# PR (Guard 1 single-flight via acquire_dispatch_lock), spawn a fresh
+# `claude -p` headless session as the dispatcher for this burst. Dispatcher
+# reads pending_events, claims clusters via deterministic cluster_id (Guard
+# 2 via db.py compute_cluster_id), spawns sub-agent workers via Agent tool
+# (one nesting level only — validated), and commits worker_reports + drains
+# pending_events. Lock is released by a background watcher on dispatcher
+# exit. Replaces the previous cluster_ready JSON emission — under A2 nothing
+# consumes those notifications because there is no long-lived parent
+# session reading <task-notification> blocks anymore; the dispatcher IS the
+# consumer.
 ###############################################################################
 
-emit_cluster_ready() {
+maybe_spawn_dispatcher() {
   # For this PR, find max(received_ts) and count of rows in pending_events.
   local row
   row=$(db_query <<SQL
@@ -289,9 +320,66 @@ SQL
   [[ -z "$max_epoch" ]] && return 0
 
   age=$(( now_epoch - max_epoch ))
-  if (( age > DEBOUNCE_SECONDS )); then
-    printf '{"type":"cluster_ready","pr":%s,"event_count":%s}\n' "$PR" "$count"
+  (( age > DEBOUNCE_SECONDS )) || return 0
+
+  # Debounce window elapsed and events are pending. Try to acquire the
+  # per-PR dispatch lock (Guard 1). If another dispatcher is already live
+  # for this PR, return silently — the pending events are durable in
+  # pending_events and will be picked up by the current dispatcher's claim
+  # pass, or by the next burst's dispatcher.
+  if ! acquire_dispatch_lock "$PR"; then
+    return 0
   fi
+
+  # Interpolate the dispatch prompt with the current burst's context.
+  # dispatch-prompt.md uses <PLACEHOLDER> style (angle brackets); bash
+  # parameter expansion (${var//pat/repl}) handles that portably with no
+  # new dependencies.
+  local prompt
+  prompt="$(cat "$DISPATCH_PROMPT_FILE")"
+  prompt="${prompt//<REPO>/$REPO}"
+  prompt="${prompt//<PR_NUMBER>/$PR}"
+  prompt="${prompt//<BRANCH_NAME>/$BRANCH}"
+  prompt="${prompt//<PIPELINE>/$PIPELINE}"
+  prompt="${prompt//<FREEFORM_INSTRUCTIONS>/$FREEFORM}"
+  prompt="${prompt//<EVENT_COUNT>/$count}"
+  prompt="${prompt//<DISPATCHER_PID>/$$}"
+
+  # Log file for the dispatcher's output — useful for crash diagnosis.
+  local log_file
+  log_file="${STATE_DIR}/dispatch-${PR}-$(date -u +%s).log"
+
+  # Spawn dispatcher as a background `claude -p` headless session. Export
+  # the two env vars the dispatcher prompt expects (BABYSIT_STATE_DB and
+  # CLAUDE_SKILL_DIR) into its environment. Dispatcher inherits cwd from
+  # poll.sh (the repo root, set when the user started babysit).
+  BABYSIT_STATE_DB="$STATE_DB" \
+  CLAUDE_SKILL_DIR="$CLAUDE_SKILL_DIR" \
+  claude -p \
+    --permission-mode acceptEdits \
+    --output-format json \
+    "$prompt" \
+    > "$log_file" 2>&1 &
+  local dispatcher_pid=$!
+
+  # Record the dispatcher pid inside the lockdir so the stale-lock check
+  # in acquire_dispatch_lock can detect a crashed dispatcher on the next
+  # burst.
+  write_dispatch_lock_pid "$PR" "$dispatcher_pid"
+
+  # Background watcher: when the dispatcher exits, release the lock. Use a
+  # disowned subshell so it survives poll.sh exit and does not block the
+  # main poll loop. Note: `wait` only works on direct children of the
+  # calling shell, and the dispatcher is a child of poll.sh (not of this
+  # subshell), so we poll `ps` instead. 2s cadence is cheap and the
+  # dispatcher's runtime dwarfs the poll interval.
+  (
+    while ps -p "$dispatcher_pid" > /dev/null 2>&1; do
+      sleep 2
+    done
+    release_dispatch_lock "$PR"
+  ) &
+  disown
 }
 
 ###############################################################################
@@ -354,6 +442,6 @@ write_dispatch_lock_pid() {
 while true; do
   poll_comments
   poll_builds
-  emit_cluster_ready
+  maybe_spawn_dispatcher
   sleep "$INTERVAL"
 done
