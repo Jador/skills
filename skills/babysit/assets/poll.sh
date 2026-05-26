@@ -206,9 +206,13 @@ SQL
     .thread_root_id as $root_id |
 
     # New = not in seen_array AND not babysit-agent self-authored.
+    # Anchor the marker to the body start instead of substring-matching:
+    # GitHub Quote reply prefixes lines with `> `, so a substring match
+    # would silently drop legitimate human replies that quote a babysit
+    # comment.
     ( [ .comments[]
         | . as $c
-        | select( (($c.body // "") | contains("<!-- babysit-agent -->")) | not )
+        | select( (($c.body // "") | startswith("<!-- babysit-agent -->")) | not )
         | select( ($seen | map(. == ($c.id | tostring)) | any) | not )
       ]
     ) as $new_comments |
