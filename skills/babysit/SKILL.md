@@ -1,13 +1,13 @@
 ---
 name: babysit
 description: Monitor a PR for review comments and build failures
-argument-hint: "[stop | clean] [--no-comments] [--no-builds] [\"instructions\"]"
+argument-hint: "[stop [--force] | clean [--dry-run]] [--no-comments] [--no-builds] [\"instructions\"]"
 disable-model-invocation: true
 ---
 
 # Babysit Skill
 
-You monitor an open PR for review comments and build failures, automatically addressing feedback and fixing broken builds. Uses the Monitor tool to run a background polling script that emits JSON events.
+You monitor an open PR for review comments and build failures, automatically addressing feedback and fixing broken builds. The skill launches a background polling script that ingests events into SQLite and spawns its own headless `claude -p` dispatcher per debounced burst — your session is not involved in dispatch after Start mode returns.
 
 ## Prerequisites
 
@@ -35,7 +35,8 @@ Parse `$ARGUMENTS` to determine the mode of operation. Before mode detection, ex
 
 - `--no-comments` — disables comment monitoring
 - `--no-builds` — disables build monitoring
-- `--dry-run` — (Clean mode only) print intended deletions and stale-cluster reaps without modifying the database
+- `--dry-run` — (Clean mode only) print intended deletions and stale-cluster reaps without modifying the filesystem or database
+- `--force` — (Stop mode only) also terminate any in-flight dispatcher processes for the targeted PR(s) in addition to the poller
 
 Strip these flags from `$ARGUMENTS` before proceeding with mode detection below. The remaining text (after flag removal and trimming whitespace) is used for mode selection.
 
@@ -43,14 +44,42 @@ If both `--no-comments` and `--no-builds` are specified, tell the user: "Both ch
 
 The `--dry-run` flag is only meaningful for Clean mode. If `--dry-run` is supplied alongside `stop` or Start mode, ignore it silently.
 
+The `--force` flag is only meaningful for Stop mode. If `--force` is supplied alongside `clean` or Start mode, ignore it silently.
+
+## Architecture
+
+Single SQLite DB at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. All writes atomic via `db.py` (Python sqlite3 with `?` bound params and `with conn:` transactions). No filesystem locks for DB state.
+
+The poll script (`assets/poll.sh`) runs as a background Task per monitored PR. On each cycle it ingests new comments + build failures into `pending_events`. After a 30s debounce window of no new events for a PR, the poller spawns a fresh headless `claude -p` dispatcher (acquiring a per-PR `mkdir`-based lock — Guard 1). The dispatcher reads pending events, runs an LLM clustering pass, atomically claims clusters via `db.py claim_cluster` with deterministic cluster_id (Guard 2), spawns sub-agent workers via the `Agent` tool, collects their JSON returns, and commits `worker_reports` + drains `pending_events`. Workers stay sub-agents because `claude -p` main thread → `Agent` tool sub-agent is one level of nesting only (validated).
+
+Workers return strict JSON — they do NOT write state. The dispatcher is the sole DB writer for `seen_events`, `clusters`, and `worker_reports`.
+
+**This means your session is not involved in dispatch.** Start mode launches `poll.sh` and exits. To observe what the background pipeline is doing, `tail -f ${CLAUDE_PLUGIN_DATA}/babysit/dispatch-<PR>-*.log`.
+
 ### Mode: Stop
 
 If the remaining text is `stop` (case-insensitive):
 
-1. **List running tasks:** Use `TaskList` to retrieve all currently running tasks.
-2. **Filter for babysit monitors:** Examine each task's description for matches beginning with `babysit-monitor`. If no matching tasks are found, print: "No babysit monitors are currently running." Then stop.
-3. **Stop each match:** Use `TaskStop` on each matching task by its ID.
-4. **Print confirmation:** Print: "Stopped N babysit monitor(s)." (where N is the count of stopped tasks).
+1. **Locate poller PID file(s):**
+   - If a PR number was discovered (see PR Detection below — Stop mode does the same auto-detect as Start mode), look at `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<PR_NUMBER>.pid`.
+   - If no PR can be detected from the current branch (e.g., the user ran `babysit stop` from outside a repo), scan `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file and operate on each in turn.
+   - If no PID files exist at all, print: "No babysit pollers are currently running." Then stop.
+
+2. **Terminate the poller(s):** For each PID file:
+   - Read the PID with `cat`.
+   - `kill -TERM <pid>` (ignore errors — the process may already have exited).
+   - Remove the PID file.
+
+3. **Default behaviour leaves in-flight dispatchers alone.** Active dispatcher processes continue to completion — they are independent of `poll.sh` and may be mid-work writing `worker_reports`. Killing them mid-cluster can leave `clusters.status='running'` rows behind that Clean mode will eventually reap.
+
+4. **`--force` mode also terminates dispatchers:** If `--force` was specified, for each affected PR:
+   - Read the dispatcher PID from `${CLAUDE_PLUGIN_DATA}/babysit/dispatch-lock-<PR>.d/pid` if it exists.
+   - `kill -TERM <pid>` (ignore errors).
+   - Remove the lockdir with `rm -rf "${CLAUDE_PLUGIN_DATA}/babysit/dispatch-lock-<PR>.d"`.
+
+5. **Print confirmation:**
+   - Without `--force`: "Stopped N babysit poller(s). In-flight dispatchers (if any) will continue to completion."
+   - With `--force`: "Stopped N babysit poller(s) and M dispatcher(s)."
 
 Then stop — do not continue to Start mode.
 
@@ -58,7 +87,7 @@ Then stop — do not continue to Start mode.
 
 If the remaining text is `clean` (case-insensitive):
 
-Clean mode delegates all DB writes to `db.py` (the CLI at `${CLAUDE_SKILL_DIR}/assets/db.py`). The `--dry-run` flag skips every destructive call — read-only queries still run so the dry-run summary is accurate. Ensure `BABYSIT_STATE_DB` is set or pass `--db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"` to each call (the examples below pass `--db` explicitly).
+Clean mode delegates DB writes to `db.py` (the CLI at `${CLAUDE_SKILL_DIR}/assets/db.py`) and sweeps stale filesystem artifacts from this skill and from the agent-teams harness. The `--dry-run` flag skips every destructive call — read-only queries and `ls`/`stat` checks still run so the dry-run summary is accurate. Ensure `BABYSIT_STATE_DB` is set or pass `--db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"` to each call (the examples below pass `--db` explicitly).
 
 If `--dry-run` was specified, print a banner first:
 
@@ -66,14 +95,14 @@ If `--dry-run` was specified, print a banner first:
 === DRY RUN — no changes will be written ===
 ```
 
-1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, print: "No babysit state found." Then stop. (`db.py` opens its own connection per call — there is no separate connect step.)
+1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, skip steps 2–6 (DB cleanup) but still run steps 7–9 (filesystem sweeps). If both the DB is missing AND no stale filesystem artifacts are found, print: "No babysit state found." Then stop.
 
 2. **Collect tracked PRs:** Ask the CLI for every PR ever recorded in `seen_events`:
    ```
    python3 "${CLAUDE_SKILL_DIR}/assets/db.py" list_distinct_prs \
        --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"
    ```
-   The CLI prints one JSON object on stdout of the shape `{"ok": true, "prs": [<pr>, ...]}`. Extract the PR numbers with `jq -r '.prs[]'`. If the array is empty, print: "No babysit state found." Then stop.
+   The CLI prints one JSON object on stdout of the shape `{"ok": true, "prs": [<pr>, ...]}`. Extract the PR numbers with `jq -r '.prs[]'`. If the array is empty, skip to step 7.
 
 3. **Check each PR's GitHub state:** For each unique PR number, run:
    ```
@@ -104,13 +133,13 @@ If `--dry-run` was specified, print a banner first:
      The CLI runs all four `DELETE`s in a single transaction and prints `{"ok": true, "counts": {...}}`. Then report: "Purged PR #<PR_NUMBER> (<state>)."
    - For preserved PRs, report: "Preserved PR #<PR_NUMBER> (still open)."
 
-5. **Stale-cluster reap:** Filesystem lockfiles are gone — abandoned cluster rows in the database are the new safety net for crashed coordinators/workers. Use the `TaskList` tool to enumerate live agent tasks, then build the list of live `cluster_id` values to preserve. A cluster is considered **live** if any running task's description matches one of:
-   - `coordinator PR #<pr>` (any coordinator task implies its cluster is in flight — include the corresponding cluster_id)
-   - any description beginning with `worker ` (worker tasks are tied to clusters via `cluster_id` in the DB; include each live worker's cluster_id)
+5. **Stale-cluster reap (cross-PR safety net):** Under A2, abandoned `clusters.status='running'` rows arise only when a dispatcher crashes mid-claim — the per-burst dispatch model means there is no per-PR reap step in the dispatcher itself. Clean mode keeps a cross-PR sweep as the safety net:
+
+   Use the `TaskList` tool to enumerate live agent tasks, then build the list of live `cluster_id` values to preserve. A cluster is considered **live** if any running task's description begins with `worker ` (worker tasks are tied to clusters via `cluster_id` in the DB; include each live worker's cluster_id).
 
    Collect those cluster_ids into a JSON array (e.g. `["c1","c2"]`) and store it as `$live_ids_json`. If no live tasks are running, use `[]`.
 
-   Print the intended reaps for any running cluster that is *not* in the live whitelist (the CLI will compute this set authoritatively, but for the dry-run banner you may pre-print "Would mark cluster <cluster_id> (PR #<pr>) as abandoned — no live coordinator/worker task" lines based on a separate read of `clusters WHERE status='running'`).
+   Print the intended reaps for any running cluster that is *not* in the live whitelist (the CLI computes the authoritative set, but for the dry-run banner you may pre-print "Would mark cluster <cluster_id> (PR #<pr>) as abandoned — no live worker task" lines based on a separate read of `clusters WHERE status='running'`).
 
    If `--dry-run` was specified, **skip the CLI call**.
 
@@ -127,38 +156,52 @@ If `--dry-run` was specified, print a banner first:
        --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"
    ```
 
-7. **Print summary:** Print a final summary block. If `--dry-run` was specified, prefix the summary with the dry-run banner repeated:
-   ```
-   === DRY RUN — no changes were written ===
-   ```
-   The summary must list:
-   - Count of PRs purged (or that would be purged in dry-run)
-   - Count of PRs preserved (still open)
-   - Count of PRs skipped due to transient errors (if any)
-   - Count of stale clusters reaped (or that would be reaped in dry-run)
+7. **Sweep stale dispatch lockdirs:** For each `${CLAUDE_PLUGIN_DATA}/babysit/dispatch-lock-*.d/` directory:
+   - Read the dispatcher pid from `<lockdir>/pid` (if it exists).
+   - Check liveness with `ps -p <pid>` — if the process is **alive**, skip this lockdir.
+   - Check lockdir mtime — if it was modified within the last hour (3600 seconds), skip (safety: don't reap a lock that just got acquired by a dispatcher that hasn't written its pid yet).
+   - Otherwise the lockdir is stale. Print: "Would remove stale dispatch lockdir <path> (pid <pid> not alive, mtime > 1h)."
+   - If `--dry-run` was NOT specified, `rm -rf "<lockdir>"`.
 
-   Example:
-   ```
-   Babysit clean summary:
-   - PRs purged:    3
-   - PRs preserved: 2
-   - PRs skipped:   0
-   - Clusters reaped: 1
-   ```
+8. **Sweep old dispatcher logs:** List `${CLAUDE_PLUGIN_DATA}/babysit/dispatch-*-*.log` files older than 30 days (use `find "${CLAUDE_PLUGIN_DATA}/babysit" -maxdepth 1 -type f -name 'dispatch-*-*.log' -mtime +30`). For each match:
+   - Print: "Would remove old dispatcher log <path>."
+   - If `--dry-run` was NOT specified, `rm -f <path>`.
+
+9. **Sweep stale agent-teams orphans:** The agent-teams harness writes scratch directories under `~/.claude/teams/` and `~/.claude/tasks/` that are not cleaned up by every code path. Sweep entries with mtime older than 7 days:
+   - `find ~/.claude/teams -mindepth 1 -maxdepth 1 -mtime +7` and `find ~/.claude/tasks -mindepth 1 -maxdepth 1 -mtime +7` (the directories may not exist — skip silently if `find` reports them missing).
+   - For each match, print: "Would remove stale agent-teams orphan <path>."
+   - If `--dry-run` was NOT specified, `rm -rf <path>`.
+
+10. **Print summary:** Print a final summary block. If `--dry-run` was specified, prefix the summary with the dry-run banner repeated:
+    ```
+    === DRY RUN — no changes were written ===
+    ```
+    The summary must list:
+    - Count of PRs purged (or that would be purged in dry-run)
+    - Count of PRs preserved (still open)
+    - Count of PRs skipped due to transient errors (if any)
+    - Count of stale clusters reaped (or that would be reaped in dry-run)
+    - Count of stale dispatch lockdirs removed
+    - Count of old dispatcher logs removed
+    - Count of stale agent-teams orphans removed
+
+    Example:
+    ```
+    Babysit clean summary:
+    - PRs purged:        3
+    - PRs preserved:     2
+    - PRs skipped:       0
+    - Clusters reaped:   1
+    - Lockdirs removed:  2
+    - Logs removed:      14
+    - Orphans removed:   5
+    ```
 
 Then stop — do not continue to Start mode.
 
 ### Mode: Start (default)
 
-If the remaining text is neither `stop` nor `clean` (case-insensitive), enter Start mode. Any remaining text after flag removal is the **freeform instructions** string. Store it for later use (it will be passed to sub-agents as `<FREEFORM_INSTRUCTIONS>`). If the remaining text is empty or blank, the freeform instructions value is `"None"`.
-
-## Architecture
-
-All persistent state lives in a single SQLite database at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. All writes are atomic — SQLite transactions replace the filesystem lockfiles used by earlier versions of this skill. There are no `.lock` files, no `flock` calls, and no directory-based mutexes anywhere in the pipeline.
-
-The poll script writes raw GitHub and Buildkite events into the `pending_events` table and emits a `cluster_ready` notification. The coordinator sub-agent reads those pending rows, clusters them via LLM reasoning, and dispatches workers only when the file sets touched by each cluster are disjoint. The coordinator owns all writes to `seen_events` — workers and the poll script never touch that table directly.
-
-Workers return strict JSON to the coordinator and do not write to the state database themselves. This keeps the write path single-threaded per cluster and avoids any need for worker-side locking.
+If the remaining text is neither `stop` nor `clean` (case-insensitive), enter Start mode. Any remaining text after flag removal is the **freeform instructions** string. Store it for later use (it will be passed to the dispatcher as `<FREEFORM_INSTRUCTIONS>` via the `FREEFORM_INSTRUCTIONS` env var that `poll.sh` reads). If the remaining text is empty or blank, the freeform instructions value is `"None"`.
 
 ## Start Mode — Detection
 
@@ -228,7 +271,7 @@ WARNING: Branch <BRANCH_NAME> has diverged from origin/main. There may be merge 
 
 Continue regardless — this is a warning only, not a blocker.
 
-### Create Data Directory
+### Create Data Directory and Bootstrap Schema
 
 Run:
 
@@ -237,69 +280,67 @@ mkdir -p "${CLAUDE_PLUGIN_DATA}/babysit"
 sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" < "${CLAUDE_SKILL_DIR}/assets/schema.sql"
 ```
 
-This ensures the state directory exists and bootstraps the SQLite schema at `${CLAUDE_PLUGIN_DATA}/babysit/state.db` for the polling script and sub-agents to read and write.
+This ensures the state directory exists and bootstraps the SQLite schema at `${CLAUDE_PLUGIN_DATA}/babysit/state.db` for the polling script and dispatcher to read and write.
 
-## Start Mode — Launch Monitor
+## Start Mode — Launch Poller
 
-Use the `Monitor` tool to start the background polling process with:
+Launch `poll.sh` as a background process via the Bash tool's `run_in_background: true` parameter. The polling script runs detached from your session, ingests events into `pending_events`, and spawns its own headless `claude -p` dispatchers on debounce — your session is not involved in dispatch.
 
-- **command**: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" BABYSIT_OWNER_PID="$$" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "<PIPELINE>" --interval 120 --no-comments` (see construction rules below)
-- **description**: `babysit-monitor PR #<PR_NUMBER>` (with actual PR number)
-- **persistent**: `true`
+**Bash tool call:**
+
+- **command:** see construction rules below.
+- **run_in_background:** `true`
+- **description:** `babysit poll PR #<PR_NUMBER>` (with actual PR number)
 
 **Command construction rules:**
-- Always include the env prefix: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}"`
-- Always include `BABYSIT_OWNER_PID="$$"` in the env prefix
-- Always include: `bash "${CLAUDE_SKILL_DIR}/assets/poll.sh"`
+- Always include the env prefix: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SKILL_DIR="${CLAUDE_SKILL_DIR}" FREEFORM_INSTRUCTIONS=<quoted-instructions>`.
+  - `<quoted-instructions>` is the freeform instructions string from Argument Parsing, single-quoted (escape any embedded single quotes by closing-the-quote / backslash-quote / reopen). If empty, pass `None`.
+- Always include: `bash "${CLAUDE_SKILL_DIR}/assets/poll.sh"`.
 - If builds are enabled (no `--no-builds` flag): include the **PIPELINE** slug as the first positional argument. If builds are disabled (`--no-builds`): omit the pipeline argument entirely.
-- Always include: `--interval 120`
+- Always include: `--interval 120`.
 - If `--no-comments` was specified: include `--no-comments`. Otherwise omit it.
+- If `--no-builds` was specified: include `--no-builds`. Otherwise omit it.
 
 Examples:
-- Both enabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" BABYSIT_OWNER_PID="$$" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 120`
-- Comments disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" BABYSIT_OWNER_PID="$$" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 120 --no-comments`
-- Builds disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" BABYSIT_OWNER_PID="$$" bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" --interval 120`
+- Both enabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SKILL_DIR="${CLAUDE_SKILL_DIR}" FREEFORM_INSTRUCTIONS='None' bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 120`
+- Comments disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SKILL_DIR="${CLAUDE_SKILL_DIR}" FREEFORM_INSTRUCTIONS='None' bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" "my-pipeline" --interval 120 --no-comments`
+- Builds disabled: `CLAUDE_PLUGIN_DATA="${CLAUDE_PLUGIN_DATA}" CLAUDE_SKILL_DIR="${CLAUDE_SKILL_DIR}" FREEFORM_INSTRUCTIONS='None' bash "${CLAUDE_SKILL_DIR}/assets/poll.sh" --interval 120 --no-builds`
 
-## Start Mode — Dispatch Instructions
+### Record the poller PID
 
-When a `<task-notification>` arrives from the monitor, parse each line of the notification body as a JSON object. Each JSON object has a `type` field. Handle each line according to its type:
+Immediately after the Bash tool returns the background task's PID, write it to a PID file so Stop mode can find and terminate the poller:
 
-### Event type: `"cluster_ready"`
+```
+echo "<POLLER_PID>" > "${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<PR_NUMBER>.pid"
+```
 
-The polling script emits this event when pending events have been queued and are ready for clustering and dispatch. The coordinator sub-agent owns clustering, atomic claims, file-disjoint wave packing, worker dispatch, and all state-database writes.
+Replace `<POLLER_PID>` with the actual PID returned by the Bash tool (the shell PID of the backgrounded `poll.sh`) and `<PR_NUMBER>` with the detected PR number.
 
-1. Read the file `${CLAUDE_SKILL_DIR}/assets/coordinator-prompt.md`.
-2. In its contents, replace:
-   - `<REPO>` with the detected **REPO** value
-   - `<PR_NUMBER>` with the detected **PR_NUMBER** value
-   - `<BRANCH_NAME>` with the detected **BRANCH_NAME** value
-   - `<PIPELINE>` with the detected **PIPELINE** value (or `"None"` if `--no-builds` was specified)
-   - `<FREEFORM_INSTRUCTIONS>` with the stored freeform instructions string (or `"None"` if none were provided)
-   - `<EVENT_COUNT>` with the `event_count` field from the JSON line (the number of pending events queued for this PR)
-3. Pass the fully interpolated prompt to the **Agent** tool with description `"coordinator PR #<PR_NUMBER>"` (with actual PR number).
-4. Print the coordinator's returned summary.
-
-### Event type: `"error"`
-
-Print a warning message: "Polling degraded: <message>. Will retry next cycle." (where `<message>` is the value of the `message` field from the JSON event). Do **not** dispatch a sub-agent for error events.
-
-### Multiple events in one notification
-
-If a single notification contains multiple JSON lines, handle each line according to its type. Multiple `cluster_ready` lines for the same PR are rare but possible; each one spawns its own coordinator invocation. Error lines are handled inline (print warning only).
+If the PID is not available from the Bash tool's return (e.g., the tool only reports a shell-id), record the shell-id instead — Stop mode reads whatever this file contains and passes it to `kill -TERM`.
 
 ## Confirmation Message
 
-After the Monitor is launched, print the following confirmation message (replacing placeholders with actual values):
+After the poller is launched and the PID file is written, print the following confirmation message (replacing placeholders with actual values):
 
 ```
 PR Babysitter started for <REPO> PR #<PR_NUMBER> (branch: <BRANCH_NAME>)
-- Monitoring: every 2 minutes
-- Review comments: enabled/disabled
-- Build status: enabled/disabled (pipeline: <PIPELINE>)
+- Monitoring:       every 2 minutes
+- Review comments:  enabled/disabled
+- Build status:     enabled/disabled (pipeline: <PIPELINE>)
+- Poller PID:       <POLLER_PID> (written to ${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<PR_NUMBER>.pid)
+
+Babysit no longer dispatches workers from your session. The background
+poller spawns its own headless `claude -p` dispatchers on debounce. To
+follow what is happening live:
+
+    tail -f "${CLAUDE_PLUGIN_DATA}/babysit/dispatch-<PR_NUMBER>-"*.log
+
+To stop the poller: `/babysit stop` (active dispatchers continue to
+completion) or `/babysit stop --force` (also kills in-flight dispatchers).
 ```
 
 For the "Review comments" line: print `enabled` if comment monitoring is active, `disabled` if `--no-comments` was specified.
 
 For the "Build status" line: print `enabled (pipeline: <PIPELINE>)` if build monitoring is active (with actual pipeline slug), or `disabled` if `--no-builds` was specified.
 
-Then stop.
+Then stop. Your session has nothing more to do — the background poller owns the lifecycle from here.
