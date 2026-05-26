@@ -8,7 +8,7 @@ Use `jq` for all JSON parsing and manipulation throughout this prompt. Pipe `gh 
 
 ## State Ownership
 
-**The coordinator owns all state writes.** This worker MUST NOT touch the state database, MUST NOT write under the plugin data directory, and MUST NOT write any seen-comments file. The worker observes, acts on the PR (comments, code edits, commits), and returns a JSON result. The coordinator is solely responsible for persisting which event IDs were resolved.
+**The orchestrating session owns all state writes.** This worker MUST NOT touch any state file, MUST NOT write under the plugin data directory, and MUST NOT write any seen-comments file. The worker observes, acts on the PR (comments, code edits, commits), and reports back to the orchestrating session. The session is solely responsible for persisting which event IDs were resolved.
 
 ## Input
 
@@ -16,7 +16,7 @@ The following `<EVENT_JSON>` contains a thread event as a JSON object with these
 
 - `thread_root_id` — the comment ID of the thread's root comment (the original review comment that started the conversation).
 - `new_comment_ids` — an array of comment IDs that are new and have not yet been processed. These are the comments this agent must respond to.
-- `event_ids` — an array of pending event IDs the coordinator assigned to this cluster. The worker echoes these back (split into resolved vs. unresolved) in the Return JSON.
+- `event_ids` — an array of pending event IDs the orchestrating session assigned to this thread. The worker echoes these back (split into resolved vs. unresolved) in the report.
 - `comments` — an ordered array of **all** comments in the thread (both old and new), sorted by `created_at`. Each comment has: `id`, `user.login`, `body`, `created_at`.
 - `file` — the file path the thread is attached to (resolved from the thread root comment).
 - `line` — the line number the thread is attached to (resolved from the thread root comment).
@@ -84,7 +84,7 @@ You are not confident in either agree or disagree, OR any of the following apply
 
 ## Step 3: Act
 
-**Branch verification (defense-in-depth).** Before doing anything that mutates the repo, verify the worktree is on the expected branch. The coordinator already checked, but the worker is what actually runs `git commit`, so it re-checks:
+**Branch verification (defense-in-depth).** Before doing anything that mutates the repo, verify the worktree is on the expected branch. The orchestrating session already checked, but the worker is what actually runs `git commit`, so it re-checks:
 
 ```
 CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
@@ -95,7 +95,7 @@ if [ "$CURRENT_BRANCH" != "<BRANCH_NAME>" ]; then
 fi
 ```
 
-If `$CURRENT_BRANCH` does not equal `<BRANCH_NAME>`, abort immediately and emit the Return JSON with:
+If `$CURRENT_BRANCH` does not equal `<BRANCH_NAME>`, abort immediately and report back with:
 - `resolved_event_ids`: `[]`
 - `unresolved_event_ids`: all IDs from the input `event_ids`
 - `files_touched`: `[]`
@@ -115,7 +115,7 @@ All actions post a **single reply** to the last new comment in the thread — th
    git add <files>
    git commit -m "Address review feedback: <brief description of change>"
    ```
-   **Do NOT push.** The coordinator owns the push (or it happens out-of-band). The worker stops at commit.
+   **Do NOT push.** The orchestrating session owns the push (or it happens out-of-band). The worker stops at commit.
 4. **Reply** to the last new comment confirming the fix via `gh api`. Use the just-committed SHA from `git rev-parse --short HEAD`:
    ```
    gh api repos/<REPO>/pulls/<PR_NUMBER>/comments/<REPLY_TO_ID>/replies \
@@ -154,9 +154,9 @@ All actions post a **single reply** to the last new comment in the thread — th
 
 ## Important Rules
 
-1. **The coordinator owns all state writes.** The worker MUST NOT write to the state database, MUST NOT write under the plugin data directory, and MUST NOT write any seen-comments file. State persistence happens in the coordinator after the worker's Return JSON is consumed.
+1. **The orchestrating session owns all state writes.** The worker MUST NOT write to any state file, MUST NOT write under the plugin data directory, and MUST NOT write any seen-comments file. State persistence happens in the orchestrating session after the worker's report is read.
 2. **One commit per thread** — this sub-agent handles exactly one thread event. All code changes from the thread are addressed in a single commit.
-3. **Do not push.** The worker stops at commit; the coordinator (or operator) is responsible for pushing.
+3. **Do not push.** The worker stops at commit; the orchestrating session (or operator) is responsible for pushing.
 4. **Verify the branch before committing.** Run the `git symbolic-ref --short HEAD` check at the top of Step 3 and abort with the Branch-mismatch Return JSON if it does not equal `<BRANCH_NAME>`.
 5. **Be conservative in disagreements** — only disagree when you have strong evidence. When in doubt, agree or escalate.
 6. **Do not modify files outside the scope of the thread discussion** — only change what the thread conversation asks about.
@@ -166,15 +166,17 @@ All actions post a **single reply** to the last new comment in the thread — th
 
 ## Return
 
-The LAST output of this agent MUST be a single fenced ```json block with the exact shape below. The coordinator parses this block to update state; nothing else is read as structured output. Prose summary, if any, goes in the `summary` field — not after the block.
+Report back to the orchestrating session with a short summary of what you did. A JSON block is helpful for the session to read structured fields, but is not strictly required — a clear prose report covering the same information is also acceptable.
 
-Compute the fields as follows:
+Suggested fields to include:
 
 - `resolved_event_ids` — the subset of input `event_ids` this agent actually addressed (posted a reply or escalation for). On Branch mismatch, this is `[]`.
 - `unresolved_event_ids` — input `event_ids` minus `resolved_event_ids`. On Branch mismatch, this is all input `event_ids`.
-- `files_touched` — output of `git diff --name-only HEAD~1 HEAD` after the worker's commit, as a JSON array. Empty array `[]` if no commit landed (DISAGREE, ESCALATE, or Branch mismatch).
-- `commit_sha` — output of `git rev-parse HEAD` after commit. Empty string `""` if no commit landed.
+- `files_touched` — output of `git diff --name-only HEAD~1 HEAD` after the worker's commit. Empty list if no commit landed (DISAGREE, ESCALATE, or Branch mismatch).
+- `commit_sha` — output of `git rev-parse HEAD` after commit. Empty string if no commit landed.
 - `summary` — one-line human-readable description of what happened. Examples below.
+
+Example JSON shape:
 
 ```json
 {"resolved_event_ids":[...], "unresolved_event_ids":[...], "files_touched":[...], "commit_sha":"...", "summary":"..."}
