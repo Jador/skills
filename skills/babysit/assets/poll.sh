@@ -153,7 +153,10 @@ trap 'log "poll loop exiting"; rm -f "$POLLER_PID_FILE"' EXIT
 # Redirect stdout to /dev/null too — PRAGMA journal_mode=WAL echoes "wal",
 # which would otherwise pollute the JSON event stream on stdout.
 if [[ -f "$SCHEMA_FILE" ]]; then
-  sqlite3 "$STATE_DB" < "$SCHEMA_FILE" >/dev/null 2>&1 || {
+  # Discard stdout (PRAGMA journal_mode echoes "wal", which would pollute
+  # the JSON event stream), but leave stderr alone so any real sqlite
+  # error lands in the tee'd poll log instead of being swallowed.
+  sqlite3 "$STATE_DB" < "$SCHEMA_FILE" >/dev/null || {
     echo '{"type":"error","kind":"init","pr":'"$PR"',"message":"Failed to apply schema.sql to state.db"}'
     exit 1
   }
@@ -191,7 +194,12 @@ poll_comments() {
   # Dedup is per-comment (not per-thread) so follow-up comments on a thread
   # whose root was already emitted still surface as new events.
   local seen_json
-  seen_json=$(db_query <<SQL
+  # `|| seen_json=""` guards against transient sqlite3 failures
+  # (concurrent VACUUM, busy timeout): set -e would otherwise propagate
+  # the non-zero exit out of the command substitution and kill the
+  # poller. An empty seen_json safely degrades to "treat everything as
+  # new" for this one cycle.
+  seen_json=$(db_query <<SQL || seen_json=""
 SELECT event_id FROM seen_events WHERE repo = '$REPO' AND pr = $PR AND kind = 'comment';
 SQL
 )
@@ -204,9 +212,15 @@ SQL
 
   # Build one event per thread that has any new (unseen, non-self-authored)
   # comments. The event carries new_comment_ids so the worker prompt can
-  # target only the comments that have not yet been handled.
+  # target only the comments that have not yet been handled. Pass REPO,
+  # PR, and BRANCH as bound --arg/--argjson strings so apostrophes or
+  # other shell-metacharacters in the values cannot break the jq filter.
   local events
-  events=$(echo "$raw_comments" | jq -c --argjson seen "$seen_array" '
+  events=$(echo "$raw_comments" | jq -c \
+    --argjson seen "$seen_array" \
+    --arg repo "$REPO" \
+    --argjson pr "$PR" \
+    --arg branch "$BRANCH" '
     [.[]] as $all |
 
     # Group all comments by thread root id.
@@ -236,9 +250,9 @@ SQL
 
     {
       type: "comment_thread",
-      pr: '"$PR"',
-      repo: "'"$REPO"'",
-      branch: "'"$BRANCH"'",
+      pr: $pr,
+      repo: $repo,
+      branch: $branch,
       thread_root_id: $root_id,
       new_comment_ids: [ $new_comments[].id ],
       comments: [ .comments[] | {
@@ -311,7 +325,8 @@ poll_builds() {
   # Pull the set of already-seen build-failure event_ids from seen_events.
   # event_id = build_number (stored as TEXT in seen_events).
   local seen_json
-  seen_json=$(db_query <<SQL
+  # See poll_comments for the rationale on `|| seen_json=""`.
+  seen_json=$(db_query <<SQL || seen_json=""
 SELECT event_id FROM seen_events WHERE repo = '$REPO' AND pr = $PR AND kind = 'build_failure';
 SQL
 )
@@ -323,21 +338,28 @@ SQL
   fi
 
   # event_id = build_number (as string). The session decides retry behaviour;
-  # the poller just emits each failed build observation once.
+  # the poller just emits each failed build observation once. Pass REPO,
+  # PR, PIPELINE, BRANCH as bound jq args so shell metacharacters cannot
+  # break the filter.
   local events
-  events=$(echo "$raw_builds" | jq -c --argjson seen "$seen_array" '
+  events=$(echo "$raw_builds" | jq -c \
+    --argjson seen "$seen_array" \
+    --arg repo "$REPO" \
+    --argjson pr "$PR" \
+    --arg pipeline "$PIPELINE" \
+    --arg branch "$BRANCH" '
     .[] |
     select(.state == "failed") |
     . as $build |
     select(($seen | map(. == ($build.number | tostring)) | any) | not) |
     {
       type: "build_failure",
-      pr: '"$PR"',
-      repo: "'"$REPO"'",
+      pr: $pr,
+      repo: $repo,
       build_number: .number,
       state: "failed",
-      pipeline: "'"$PIPELINE"'",
-      branch: "'"$BRANCH"'",
+      pipeline: $pipeline,
+      branch: $branch,
       jobs: [.jobs[]? | select(.state != "passed") | {id: .id, name: .name, state: .state}]
     }
   ' 2>/dev/null) || return 0
