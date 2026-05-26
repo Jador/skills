@@ -209,6 +209,22 @@ def test_legacy_build_files_migrate_with_kind_build_failure(plugin_data: Path):
     ]
 
 
+def test_migrate_sh_uses_bail_on_for_multistatement_blocks():
+    # sqlite3 CLI keeps executing after a per-statement error by default,
+    # which silently breaks the atomicity of BEGIN/COMMIT heredocs and
+    # the bare DROP block. `.bail on` makes the CLI exit on first
+    # error so partial migrations never land. Regression-guard: assert
+    # the directive appears in migrate.sh.
+    src = MIGRATE_SH.read_text()
+    # The dispatcher-cleanup block, the column-upgrade transaction, and
+    # the legacy-import sql_tmp construction must all carry `.bail on`.
+    occurrences = src.count(".bail on")
+    assert occurrences >= 3, (
+        f"expected .bail on in dispatcher drop block, v2->v3 rebuild, "
+        f"and legacy import; found {occurrences}"
+    )
+
+
 def test_fresh_v3_db_unchanged_by_migrate(plugin_data: Path):
     # Bootstrap a fresh v3 DB. Running migrate.sh against it must not
     # touch the rows.

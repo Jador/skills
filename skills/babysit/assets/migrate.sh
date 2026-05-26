@@ -52,7 +52,11 @@ sqlite3 "$DB_FILE" < "$SCHEMA_FILE" >/dev/null
 # that existed in the v2 schema but are no longer used. DROP IF EXISTS is
 # idempotent so this is a no-op on fresh v3 databases.
 if [[ -f "$DB_FILE" ]]; then
+    # `.bail on` makes the CLI exit as soon as any statement errors,
+    # so a failure mid-script does not silently leave the database
+    # half-migrated.
     sqlite3 "$DB_FILE" <<'SQL' >/dev/null
+.bail on
 DROP TABLE IF EXISTS clusters;
 DROP TABLE IF EXISTS worker_reports;
 DROP TABLE IF EXISTS pending_events;
@@ -76,7 +80,15 @@ if [[ "$has_repo" == "0" ]]; then
     # kind value, the v3 SELECT would miss it, and the thread would
     # re-emit on first poll — producing duplicate worker replies on
     # every previously-handled review thread.
+    # `.bail on` makes the BEGIN/COMMIT genuinely atomic — without it
+    # sqlite3 keeps executing after a per-statement failure, so a
+    # mid-script error (corrupt source row, busy lock) could let DROP
+    # TABLE seen_events_v2 fire and COMMIT against a partial rebuild,
+    # destroying the source data with no rollback. With .bail on the
+    # CLI exits immediately on any error and the transaction is
+    # discarded.
     sqlite3 "$DB_FILE" <<'SQL' >/dev/null
+.bail on
 BEGIN;
 ALTER TABLE seen_events RENAME TO seen_events_v2;
 CREATE TABLE seen_events (
@@ -169,9 +181,13 @@ for dir in "${LEGACY_DIRS[@]}"; do
     [[ "$total_files" -eq 0 ]] && continue
 
     # Build a single SQL transaction with all UPSERTs for this dir.
+    # `.bail on` keeps the transaction atomic: any per-statement failure
+    # exits the CLI without firing COMMIT, so partial imports never
+    # land on disk.
     sql_tmp="$(mktemp)"
     trap 'rm -f "$sql_tmp"' EXIT
     {
+        echo ".bail on"
         echo "BEGIN;"
         for f in "${comment_files[@]:-}"; do
             [[ -z "$f" ]] && continue
