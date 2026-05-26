@@ -385,15 +385,23 @@ SQL
   # ${CLAUDE_PLUGIN_DATA}/babysit/ — both outside the user's repo.
   # `--max-budget-usd` caps spend per dispatch since each burst is a
   # fresh session with no inherited limits.
-  BABYSIT_STATE_DB="$STATE_DB" \
-  CLAUDE_SKILL_DIR="$CLAUDE_SKILL_DIR" \
-  claude -p \
-    --permission-mode acceptEdits \
-    --output-format json \
-    --max-budget-usd 50 \
-    --add-dir "${CLAUDE_SKILL_DIR}" \
-    --add-dir "${CLAUDE_PLUGIN_DATA}" \
-    "$prompt" > "$log_file" 2>&1 &
+  # Feed the (18+ KB) dispatch prompt via stdin, NOT as a positional arg.
+  # `claude -p` silently exits with no output when handed a large prompt as
+  # argv — every dispatcher log was 0 bytes until this switch. Manual repro
+  # in v2.0.1 debug session: same 18 KB prompt via positional arg → 0-byte
+  # log + no exit code observable; via `printf | claude -p` → valid JSON
+  # in 30s. Cause unconfirmed (argv limit math says we are well below
+  # ARG_MAX=1MB on macOS; suspect special-character handling in claude's
+  # CLI parser for large positional prompts). Stdin sidesteps it entirely.
+  printf '%s' "$prompt" | BABYSIT_STATE_DB="$STATE_DB" \
+    CLAUDE_SKILL_DIR="$CLAUDE_SKILL_DIR" \
+    claude -p \
+      --permission-mode acceptEdits \
+      --output-format json \
+      --max-budget-usd 50 \
+      --add-dir "${CLAUDE_SKILL_DIR}" \
+      --add-dir "${CLAUDE_PLUGIN_DATA}" \
+      > "$log_file" 2>&1 &
   local dispatcher_pid=$!
 
   # Atomically rewrite the placeholder PID written by acquire_dispatch_lock
