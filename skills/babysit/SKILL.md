@@ -79,11 +79,13 @@ PID files are scoped by both repository and PR number. The convention is `babysi
    - Run `gh repo view --json nameWithOwner --jq .nameWithOwner` to get **REPO**.
    - Run `gh pr view --json number --jq .number` to get **PR_NUMBER**.
 
-   If **both** commands succeed, compute `<REPO_SAFE>` (`owner/repo` with each `/` replaced by `__`) and target only `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`.
+   Then resolve the PID file path in three steps, falling through on failure:
 
-   If **either** command fails (e.g., `/babysit stop` was run from outside a git repo, or the current branch has no PR), fall back to scanning `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file. Print a one-line notice before proceeding: "No PR detected — stopping all babysit pollers."
+   1. **If both commands succeed**, compute `<REPO_SAFE>` (`owner/repo` with each `/` replaced by `__`) and check whether `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid` exists. If it does, target only that file.
+   2. **If the gh-derived PID file does not exist** (gh resolved a (repo, PR) but no poller is running for it — typically because `/babysit stop` was run from a different worktree than where the poller was launched), fall through to scanning `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file. Print a one-line notice: "Auto-detected <REPO>#<PR_NUMBER> has no poller — stopping all babysit pollers instead."
+   3. **If either gh command fails** (e.g., `/babysit stop` was run from outside a git repo, or the current branch has no PR), fall back to the same scan-all path. Print a one-line notice: "No PR detected — stopping all babysit pollers."
 
-   If no matching PID files exist (in either path), print: "No babysit pollers are currently running." Then stop.
+   If no matching PID files exist after all three steps, print: "No babysit pollers are currently running." Then stop.
 
 2. **Terminate the poller(s):** For each PID file located in step 1:
    - Read the PID with `cat`.
@@ -114,13 +116,26 @@ If `--dry-run` was specified, print a banner first:
    python3 "${CLAUDE_SKILL_DIR}/assets/db.py" list_distinct_prs \
        --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"
    ```
-   The CLI prints one JSON object on stdout of the shape `{"ok": true, "prs": [{"repo": "<owner/repo>", "pr": <pr>}, ...]}`. Extract the pairs with `jq -c '.prs[]'`. If the array is empty, skip to step 6.
+   The CLI prints one JSON object on stdout of the shape `{"ok": true, "prs": [{"repo": "<owner/repo>", "pr": <pr>}, ...]}`. Extract the pairs as one JSON object per line:
+   ```
+   pairs=$(python3 "${CLAUDE_SKILL_DIR}/assets/db.py" list_distinct_prs \
+              --db "${CLAUDE_PLUGIN_DATA}/babysit/state.db" \
+              | jq -c '.prs[]')
+   ```
+   If `$pairs` is empty, skip to step 6.
 
    Rows with the sentinel repo `legacy/unknown` are pre-v3 imports whose origin repo was not preserved. They are surfaced like any other pair — the GitHub state check below will fail with "Could not resolve" and they will be purged in step 4.
 
-3. **Check each pair's GitHub state:** For each `(repo, pr)` pair, run:
+3. **Check each pair's GitHub state:** Iterate over `$pairs`. For each line, **unpack the JSON object into separate `REPO` and `PR_NUMBER` shell variables before substituting them into any command**. Pasting the raw `{"repo":...,"pr":...}` object into the command template below would make `gh` and `db.py` see a literal JSON blob as their argument, fail with an arg-parse error, and fall into the "transient skip" bucket — Clean mode would silently no-op on every closed PR.
+
    ```
-   gh pr view <PR_NUMBER> --repo <REPO> --json state --jq .state 2>/tmp/babysit-gh-err.$$
+   while IFS= read -r pair; do
+       REPO=$(echo "$pair" | jq -r '.repo')
+       PR_NUMBER=$(echo "$pair" | jq -r '.pr')
+       gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq .state \
+           2>/tmp/babysit-gh-err.$$
+       # ... classify based on exit code and stderr, see below ...
+   done <<< "$pairs"
    ```
    `--repo` is mandatory here — without it, `gh` resolves against the current working directory and a wrong-cwd invocation would misclassify every pair.
 
