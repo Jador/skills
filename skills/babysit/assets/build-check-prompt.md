@@ -22,13 +22,16 @@ The session may also prepend `Freeform instructions:` text above the JSON block.
 
 Use `jq` for all JSON parsing and manipulation. Pipe `gh api` output through `jq` to extract fields, filter arrays, and transform data. Do not parse JSON by hand or with string matching.
 
-**Setup before running shell commands:** capture the event JSON in a shell variable so the `jq` invocations in the steps below work as written. Single-quote the JSON to preserve it verbatim:
+**Setup before running shell commands:** write the event JSON to a temp file using a heredoc with a **single-quoted delimiter**. The single quotes around `JSON_EOF` prevent the shell from expanding anything inside the body, so apostrophes, backticks, `$variables`, and other metacharacters in the JSON survive verbatim. Do **not** wrap the JSON in `EVENT_JSON='…'`: any apostrophe in the build payload (job names, log excerpts) would terminate the quote and the variable would contain garbage.
 
 ```
-EVENT_JSON='<paste the full JSON object from the user message here>'
+EVENT_FILE=$(mktemp)
+cat > "$EVENT_FILE" <<'JSON_EOF'
+<paste the full JSON object from the user message here, verbatim>
+JSON_EOF
 ```
 
-You can also pipe it through a heredoc or write it to a temp file — whatever keeps the rest of the commands readable. The remainder of this prompt assumes `$EVENT_JSON` holds the event.
+All subsequent `jq` invocations below read from `"$EVENT_FILE"`.
 
 ## State Ownership
 
@@ -41,7 +44,7 @@ You do NOT read or write any state file. The orchestrating session owns all stat
 Before doing anything else, verify the worktree is on the expected branch:
 
 ```
-EXPECTED_BRANCH=$(jq -r '.branch' <<<"$EVENT_JSON")
+EXPECTED_BRANCH=$(jq -r '.branch' "$EVENT_FILE")
 CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
 if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
   # Abort — skip directly to Return with summary "Branch mismatch: expected ..., got ..."
@@ -54,10 +57,10 @@ If the branches differ, abort immediately and report `Branch mismatch: expected 
 Pull useful identifiers into shell variables for later commands:
 
 ```
-PR=$(jq -r '.pr' <<<"$EVENT_JSON")
-REPO=$(jq -r '.repo' <<<"$EVENT_JSON")
-BUILD_NUMBER=$(jq -r '.build_number' <<<"$EVENT_JSON")
-PIPELINE=$(jq -r '.pipeline' <<<"$EVENT_JSON")
+PR=$(jq -r '.pr' "$EVENT_FILE")
+REPO=$(jq -r '.repo' "$EVENT_FILE")
+BUILD_NUMBER=$(jq -r '.build_number' "$EVENT_FILE")
+PIPELINE=$(jq -r '.pipeline' "$EVENT_FILE")
 ```
 
 ---

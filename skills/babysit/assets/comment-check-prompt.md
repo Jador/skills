@@ -24,13 +24,16 @@ The session may also prepend `Freeform instructions:` text above the JSON block.
 
 Use `jq` for all JSON parsing and manipulation. Pipe `gh api` output through `jq` to extract fields, filter arrays, and transform data. Do not parse JSON by hand or with string matching.
 
-**Setup before running shell commands:** capture the event JSON in a shell variable so the `jq` invocations in the steps below work as written. Single-quote the JSON to preserve it verbatim:
+**Setup before running shell commands:** write the event JSON to a temp file using a heredoc with a **single-quoted delimiter**. The single quotes around `JSON_EOF` prevent the shell from expanding anything inside the body — apostrophes, backticks, `$variables`, and other metacharacters in the JSON survive verbatim, which is essential because review comment bodies routinely contain contractions like `don't` or `it's`. Do **not** wrap the JSON in `EVENT_JSON='…'`: an apostrophe in a comment body would terminate the quote and the variable would contain garbage.
 
 ```
-EVENT_JSON='<paste the full JSON object from the user message here>'
+EVENT_FILE=$(mktemp)
+cat > "$EVENT_FILE" <<'JSON_EOF'
+<paste the full JSON object from the user message here, verbatim>
+JSON_EOF
 ```
 
-You can also pipe it through a heredoc or write it to a temp file — whatever keeps the rest of the commands readable. The remainder of this prompt assumes `$EVENT_JSON` holds the event.
+All subsequent `jq` invocations below read from `"$EVENT_FILE"` (e.g. `jq -r '.pr' "$EVENT_FILE"`) so reviewer text with embedded quotes round-trips cleanly.
 
 ## State Ownership
 
@@ -95,7 +98,7 @@ You are not confident in either agree or disagree, OR any of the following apply
 Extract the expected branch from the event JSON and compare against the current branch:
 
 ```
-EXPECTED_BRANCH=$(jq -r '.branch' <<<"$EVENT_JSON")
+EXPECTED_BRANCH=$(jq -r '.branch' "$EVENT_FILE")
 CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
 if [ "$CURRENT_BRANCH" != "$EXPECTED_BRANCH" ]; then
   # Abort — do not commit, do not post comments. Skip to the Return
@@ -113,9 +116,9 @@ All actions post a **single reply** to the last new comment in the thread — th
 Pull useful identifiers into shell variables (`$PR`, `$REPO`, `$BRANCH`, `$REPLY_TO_ID`) once so the commands below stay readable:
 
 ```
-PR=$(jq -r '.pr' <<<"$EVENT_JSON")
-REPO=$(jq -r '.repo' <<<"$EVENT_JSON")
-REPLY_TO_ID=$(jq -r '.new_comment_ids | max' <<<"$EVENT_JSON")
+PR=$(jq -r '.pr' "$EVENT_FILE")
+REPO=$(jq -r '.repo' "$EVENT_FILE")
+REPLY_TO_ID=$(jq -r '.new_comment_ids | max' "$EVENT_FILE")
 ```
 
 ### If AGREE — Fix, Verify, Commit, Reply
