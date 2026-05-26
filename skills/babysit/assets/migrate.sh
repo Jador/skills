@@ -48,6 +48,20 @@ mkdir -p "$BABYSIT_DIR"
 # Redirect stdout to discard the "wal" echo from PRAGMA journal_mode.
 sqlite3 "$DB_FILE" < "$SCHEMA_FILE" >/dev/null
 
+# Silent v2->v3 migration: drop dispatcher/clustering tables and their indexes
+# that existed in the v2 schema but are no longer used. DROP IF EXISTS is
+# idempotent so this is a no-op on fresh v3 databases.
+if [[ -f "$DB_FILE" ]]; then
+    sqlite3 "$DB_FILE" <<'SQL' >/dev/null
+DROP TABLE IF EXISTS clusters;
+DROP TABLE IF EXISTS worker_reports;
+DROP TABLE IF EXISTS pending_events;
+DROP INDEX IF EXISTS idx_clusters_pr;
+DROP INDEX IF EXISTS idx_clusters_status;
+DROP INDEX IF EXISTS idx_pending_events_pr;
+SQL
+fi
+
 NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # --- (c)-(e) Walk legacy dirs --------------------------------------------
