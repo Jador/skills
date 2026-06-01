@@ -21,7 +21,7 @@ if [[ -z "${CLAUDE_PLUGIN_DATA:-}" ]]; then
     exit 1
 fi
 
-for tool in sqlite3 jq; do
+for tool in sqlite3 jq shasum; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: required tool '$tool' not found on PATH." >&2
         exit 1
@@ -205,10 +205,15 @@ for dir in "${LEGACY_DIRS[@]}"; do
                 | tostring
             ' "$f" 2>/dev/null); then
                 while IFS= read -r id; do
-                    [[ -z "$id" ]] && continue
-                    # SQL-escape single quotes.
-                    id_esc="${id//\'/\'\'}"
-                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'comment', '${id_esc}', '${NOW_TS}');"
+                    # GitHub comment ids are integers. Require a purely
+                    # numeric id: this drops empty lines and rejects any
+                    # corrupt value (embedded newline, control char, NUL)
+                    # that single-quote escaping alone would pass through
+                    # into the generated SQL and split the INSERT across
+                    # statements — which, with `.bail on`, rolls back the
+                    # whole directory's import.
+                    [[ "$id" =~ ^[0-9]+$ ]] || continue
+                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'comment', '${id}', '${NOW_TS}');"
                 done <<< "$ids"
             fi
         done
@@ -226,9 +231,10 @@ for dir in "${LEGACY_DIRS[@]}"; do
                 | tostring
             ' "$f" 2>/dev/null); then
                 while IFS= read -r id; do
-                    [[ -z "$id" ]] && continue
-                    id_esc="${id//\'/\'\'}"
-                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'build_failure', '${id_esc}', '${NOW_TS}');"
+                    # Build numbers are integers — same numeric guard as
+                    # the comment path above.
+                    [[ "$id" =~ ^[0-9]+$ ]] || continue
+                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'build_failure', '${id}', '${NOW_TS}');"
                 done <<< "$ids"
             fi
         done

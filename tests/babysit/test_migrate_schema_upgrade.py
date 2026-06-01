@@ -209,6 +209,42 @@ def test_legacy_build_files_migrate_with_kind_build_failure(plugin_data: Path):
     ]
 
 
+def test_migrate_requires_shasum_in_precheck():
+    # shasum is invoked to disambiguate legacy-dir basenames. It must be
+    # in the precheck tool loop so a missing shasum fails fast with an
+    # actionable message, not mid-run after the schema rebuild has
+    # already dropped tables.
+    src = MIGRATE_SH.read_text()
+    assert "for tool in sqlite3 jq shasum" in src, (
+        "shasum must be in the precondition tool check"
+    )
+
+
+def test_legacy_comment_ids_numeric_guard_skips_corrupt(plugin_data: Path):
+    # A legacy seen-comments file with a non-numeric / multi-line id must
+    # not break the generated SQL. The numeric guard drops the corrupt
+    # entry and imports the valid ones.
+    babysit_dir = plugin_data / "babysit"
+    legacy_file = babysit_dir / "9-seen-comments.json"
+    # "200" and "201" are valid; the middle entry has an embedded newline
+    # that would split the INSERT across statements without the guard.
+    legacy_file.write_text('["200", "bad\\nid", "201"]')
+
+    result = _run_migrate(plugin_data)
+    assert result.returncode == 0, result.stderr
+
+    db = babysit_dir / "state.db"
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute(
+            "SELECT event_id FROM seen_events WHERE pr = 9 ORDER BY event_id"
+        ).fetchall()
+    finally:
+        conn.close()
+    # Only the two clean numeric ids survive; the corrupt one is dropped.
+    assert [r[0] for r in rows] == ["200", "201"]
+
+
 def test_migrate_sh_uses_bail_on_for_multistatement_blocks():
     # sqlite3 CLI keeps executing after a per-statement error by default,
     # which silently breaks the atomicity of BEGIN/COMMIT heredocs and
