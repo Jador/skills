@@ -14,11 +14,26 @@ Behavioural contract under test:
 
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
+
 from skills.babysit.assets.db import (
     insert_seen_event,
     insert_seen_event_batch,
     purge_pr,
 )
+
+
+def test_repo_column_rejects_null(conn):
+    # repo is part of the PK; SQLite treats NULLs in a PK column as
+    # distinct, so a NULL-repo row would never dedupe. The schema
+    # enforces NOT NULL to make that impossible.
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO seen_events (repo, pr, kind, event_id, ts) "
+            "VALUES (NULL, 42, 'comment', '999', 't')"
+        )
 
 
 def _count_seen(conn, **where) -> int:

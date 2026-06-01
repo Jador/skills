@@ -92,7 +92,7 @@ if [[ "$has_repo" == "0" ]]; then
 BEGIN;
 ALTER TABLE seen_events RENAME TO seen_events_v2;
 CREATE TABLE seen_events (
-    repo TEXT,
+    repo TEXT NOT NULL,
     pr INT,
     kind TEXT,
     event_id TEXT,
