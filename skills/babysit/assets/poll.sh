@@ -52,6 +52,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Defense-in-depth: SKILL.md guards this at the orchestration layer, but a
+# direct `bash poll.sh --no-comments --no-builds` would otherwise spin up a
+# poller that holds a PID file, loops forever, and polls nothing — a silent
+# no-op with no diagnostic. Refuse it here too.
+if [[ "$NO_COMMENTS" == "true" && "$NO_BUILDS" == "true" ]]; then
+  echo '{"type":"error","kind":"init","pr":null,"message":"Both --no-comments and --no-builds set — nothing to poll."}'
+  exit 1
+fi
+
 ###############################################################################
 # Startup: auto-detect repo, PR, branch from cwd
 ###############################################################################
@@ -63,6 +72,18 @@ BRANCH=""
 REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null) || true
 if [[ -z "$REPO" ]]; then
   echo '{"type":"error","kind":"init","pr":null,"message":"Failed to detect repository via gh repo view"}'
+  exit 1
+fi
+
+# REPO is interpolated as a single-quoted SQL string literal in the inline
+# db_query reads below (the dedup SELECTs and the cycle-end count). GitHub
+# repo slugs are constrained to owner/name where each component is
+# [A-Za-z0-9._-], so a value outside that set means the gh output shape
+# changed or something injected it — reject it rather than build a SQL
+# literal that could break the query (and have the `|| seen_json=""` rescue
+# silently turn the whole dedup set empty, re-emitting every seen comment).
+if [[ ! "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+  echo '{"type":"error","kind":"init","pr":null,"message":"Detected repository slug has unexpected characters; refusing to start."}'
   exit 1
 fi
 
@@ -85,8 +106,26 @@ fi
 # guard, --argjson pr "$PR" would later feed jq a non-numeric arg and
 # the filter would fail; `|| return 0` swallowing the failure would
 # then make poll_comments / poll_builds silently no-op forever.
+#
+# Build the error with jq, not string interpolation: this branch fires
+# precisely when $PR is junk, and a value containing a double-quote or
+# backslash (e.g. an HTML error page leaking through) would produce
+# invalid JSON that the session routes to "malformed event" instead of
+# surfacing the real cause.
 if [[ ! "$PR" =~ ^[0-9]+$ ]]; then
-  echo '{"type":"error","kind":"init","pr":null,"message":"Detected PR value is not numeric: '"$PR"'"}'
+  jq -cn --arg pr "$PR" \
+    '{type:"error",kind:"init",pr:null,message:("Detected PR value is not numeric: " + $pr)}'
+  exit 1
+fi
+
+# BRANCH is parsed from the same gh output as PR but only checked for
+# non-empty above. A missing headRefName makes jq print the literal
+# "null" (deleted source ref, race with a force-push). BRANCH="null"
+# would pass the empty check, then `bk build list --branch null` finds
+# nothing and every comment worker aborts with a branch mismatch — the
+# poller looks alive but never acts. Reject the sentinel explicitly.
+if [[ "$BRANCH" == "null" ]]; then
+  echo '{"type":"error","kind":"init","pr":'"$PR"',"message":"Detected branch is null (missing headRefName); refusing to start."}'
   exit 1
 fi
 
@@ -154,8 +193,19 @@ if ! (set -C; echo "$$" > "$POLLER_PID_FILE") 2>/dev/null; then
     echo '{"type":"error","kind":"init","pr":'"$PR"',"message":"Another babysit poller is already running for this PR (pid '"$existing_pid"'). Run /babysit stop first."}'
     exit 1
   fi
-  # Stale PID file. Owning process is gone; reclaim the slot.
-  echo "$$" > "$POLLER_PID_FILE"
+  # Stale PID file (owning process is gone) — reclaim the slot. Remove
+  # the stale file and re-run the SAME atomic noclobber create. Using a
+  # plain `echo > file` here would reintroduce the TOCTOU the noclobber
+  # guard exists to prevent: two pollers that both saw the stale file
+  # could both overwrite, leaving two live pollers for one (repo, PR)
+  # and a PID file pointing at only one of them. If the atomic recreate
+  # loses the race, another poller won — refuse rather than clobber.
+  rm -f "$POLLER_PID_FILE"
+  if ! (set -C; echo "$$" > "$POLLER_PID_FILE") 2>/dev/null; then
+    existing_pid=$(cat "$POLLER_PID_FILE" 2>/dev/null || true)
+    echo '{"type":"error","kind":"init","pr":'"$PR"',"message":"Lost PID-file race while reclaiming a stale slot (now held by pid '"${existing_pid:-unknown}"'). Run /babysit stop first."}'
+    exit 1
+  fi
 fi
 trap 'log "poll loop exiting"; rm -f "$POLLER_PID_FILE"' EXIT
 

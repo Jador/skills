@@ -66,8 +66,9 @@ def test_refuses_to_start_with_live_pid_already_in_file(plugin_data: Path,
     pid_file.write_text(f"{os.getpid()}\n")
 
     result = subprocess.run(
-        ["bash", str(POLL_SH), "--no-builds", "--no-comments",
-         "--interval", "30"],
+        # Only --no-builds: --no-comments too would trip the both-flags
+        # guard before the PID check we are exercising here.
+        ["bash", str(POLL_SH), "--no-builds", "--interval", "30"],
         env=_base_env(plugin_data, bin_dir),
         capture_output=True,
         text=True,
@@ -90,11 +91,11 @@ def test_reclaims_slot_when_pid_in_file_is_stale(plugin_data: Path,
     bin_dir = tmp_path / "bin"
     _write_fake_gh(bin_dir)
 
-    # Find a PID that is guaranteed NOT alive. Spawn a short-lived
-    # process and reap it; the PID is now free.
-    sentinel = subprocess.Popen(["true"])
-    sentinel.wait()
-    dead_pid = sentinel.pid
+    # Use a PID guaranteed not alive AND not reusable by the poll.sh
+    # process we are about to spawn. Reaping a real short-lived PID is
+    # flaky: the OS can reassign that exact number to poll.sh itself.
+    # A value above the platform pid_max can never name a live process.
+    dead_pid = 2_147_483_646
 
     pid_file = _pid_file(plugin_data)
     pid_file.write_text(f"{dead_pid}\n")
@@ -103,8 +104,9 @@ def test_reclaims_slot_when_pid_in_file_is_stale(plugin_data: Path,
     # then enter the sleep loop. Kill it via timeout.
     try:
         subprocess.run(
-            ["bash", str(POLL_SH), "--no-builds", "--no-comments",
-             "--interval", "30"],
+            # Only --no-builds: both --no-* flags would trip the
+            # both-flags guard before the PID reclaim we are testing.
+            ["bash", str(POLL_SH), "--no-builds", "--interval", "30"],
             env=_base_env(plugin_data, bin_dir),
             capture_output=True,
             text=True,

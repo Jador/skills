@@ -140,11 +140,13 @@ def test_no_builds_flag_skips_pipeline_requirement(plugin_data: Path,
     # With --no-builds, the missing pipeline is fine. Poller proceeds
     # past init and enters its sleep loop — kill it after a short
     # window via timeout.
+    # Only --no-builds (comments stay enabled) — must NOT trip the
+    # both-flags guard, and the missing pipeline is fine.
     bin_dir = tmp_path / "bin"
     _write_fake_gh(bin_dir)
 
     try:
-        result = _run_poll("--no-builds", "--no-comments", "--interval", "30",
+        result = _run_poll("--no-builds", "--interval", "30",
                            env_extra=_base_env(plugin_data, bin_dir),
                            timeout=2.0)
     except subprocess.TimeoutExpired as e:
@@ -156,3 +158,84 @@ def test_no_builds_flag_skips_pipeline_requirement(plugin_data: Path,
     # If it exited cleanly within 2s, something is off.
     pytest.fail(f"Poller exited early: rc={result.returncode} "
                 f"stdout={result.stdout!r} stderr={result.stderr!r}")
+
+
+def test_both_no_flags_rejected(plugin_data: Path, tmp_path: Path):
+    # --no-comments --no-builds together = nothing to poll. Must fail
+    # fast, not spin up a silent no-op poller. The guard fires before
+    # repo detection, so gh need not be reachable — but provide it for
+    # realism.
+    bin_dir = tmp_path / "bin"
+    _write_fake_gh(bin_dir)
+
+    result = _run_poll("--no-comments", "--no-builds",
+                       env_extra=_base_env(plugin_data, bin_dir))
+    assert result.returncode == 1
+    payload = json.loads(result.stdout.strip().splitlines()[0])
+    assert payload["kind"] == "init"
+    assert payload["pr"] is None
+    assert "nothing to poll" in payload["message"].lower()
+
+
+def test_init_error_when_branch_is_null(plugin_data: Path, tmp_path: Path):
+    # gh returned a numeric PR but headRefName=null (deleted source ref).
+    # BRANCH="null" must be rejected, not silently accepted.
+    bin_dir = tmp_path / "bin"
+    _write_fake_gh(bin_dir, branch="null")
+
+    result = _run_poll("--no-builds",
+                       env_extra=_base_env(plugin_data, bin_dir))
+    assert result.returncode == 1
+    payload = json.loads(result.stdout.strip().splitlines()[0])
+    assert payload["kind"] == "init"
+    assert payload["pr"] == 42
+    assert "branch is null" in payload["message"].lower()
+
+
+def test_init_error_repo_bad_charset(plugin_data: Path, tmp_path: Path):
+    # A repo slug outside [A-Za-z0-9._-]/[...] means the gh output shape
+    # changed or something injected it — refuse rather than build an
+    # unsafe SQL literal.
+    bin_dir = tmp_path / "bin"
+    _write_fake_gh(bin_dir, repo="org/foo;DROP")
+
+    result = _run_poll("--no-builds",
+                       env_extra=_base_env(plugin_data, bin_dir))
+    assert result.returncode == 1
+    payload = json.loads(result.stdout.strip().splitlines()[0])
+    assert payload["kind"] == "init"
+    assert "unexpected characters" in payload["message"].lower()
+
+
+def test_non_numeric_pr_error_is_valid_json_with_quotes(plugin_data: Path,
+                                                        tmp_path: Path):
+    # The non-numeric-PR error must stay valid JSON even when the bad
+    # PR value itself contains a double-quote (built via jq, not string
+    # interpolation). Use a literal heredoc in the fake gh so the quote
+    # survives into poll.sh verbatim.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$1 $2" in\n'
+        '  "repo view") echo "org-a/foo" ;;\n'
+        '  "pr view")\n'
+        "    cat <<'PR_EOF'\n"
+        'bad"value\n'
+        "feat/x\n"
+        "PR_EOF\n"
+        "    ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n"
+    )
+    gh.chmod(0o755)
+
+    result = _run_poll(env_extra=_base_env(plugin_data, bin_dir))
+    assert result.returncode == 1
+    line = result.stdout.strip().splitlines()[0]
+    # Must parse — the bug was invalid JSON here.
+    payload = json.loads(line)
+    assert payload["kind"] == "init"
+    assert payload["pr"] is None
+    assert 'bad"value' in payload["message"]
