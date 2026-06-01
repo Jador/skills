@@ -73,27 +73,19 @@ There are no per-PR locks and no second long-running LLM process spawned by `pol
 
 If the remaining text is `stop` (case-insensitive):
 
-PID files are scoped by both repository and PR number. The convention is `babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`, where `<REPO_SAFE>` is `owner/repo` with every `/` replaced by `__`. This lets babysit run concurrently against PRs with the same number across different repositories — and lets Stop mode target a single (repo, PR) without disturbing other pollers.
+Babysit is scoped to the PR of the current working directory's branch — Start mode refuses to run without one, and Stop mode targets that same single (repo, PR). It never stops pollers for other repos or PRs; to stop a different poller, run `/babysit stop` from that worktree. PID files are named `babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`, where `<REPO_SAFE>` is `owner/repo` with every `/` replaced by `__`.
 
-1. **Locate poller PID file(s):** Try to auto-detect the current (repo, PR) the same way Start mode does:
+1. **Resolve the current (repo, PR)** exactly as Start mode does:
    - Run `gh repo view --json nameWithOwner --jq .nameWithOwner` to get **REPO**.
    - Run `gh pr view --json number --jq .number` to get **PR_NUMBER**.
 
-   Then resolve the PID file path in three steps, falling through on failure:
+   If **either** command fails (run from outside a git repo, or the current branch has no PR), there is nothing this invocation can act on. Print: "No PR found for the current branch — nothing to stop. Run /babysit stop from the worktree whose PR you want to stop." Then stop. **Do not** scan for or kill other pollers.
 
-   1. **If both commands succeed**, compute `<REPO_SAFE>` (`owner/repo` with each `/` replaced by `__`) and check whether `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid` exists. If it does, target only that file.
-   2. **If the gh-derived PID file does not exist** (gh resolved a (repo, PR) but no poller is running for it — typically because `/babysit stop` was run from a different worktree than where the poller was launched), fall through to scanning `${CLAUDE_PLUGIN_DATA}/babysit/` for every `babysit-pid-*.pid` file. Print a one-line notice: "Auto-detected <REPO>#<PR_NUMBER> has no poller — stopping all babysit pollers instead."
-   3. **If either gh command fails** (e.g., `/babysit stop` was run from outside a git repo, or the current branch has no PR), fall back to the same scan-all path. Print a one-line notice: "No PR detected — stopping all babysit pollers."
+2. **Target the single PID file:** Compute `<REPO_SAFE>` and the path `${CLAUDE_PLUGIN_DATA}/babysit/babysit-pid-<REPO_SAFE>-<PR_NUMBER>.pid`.
+   - If it does not exist, print: "No babysit poller running for <REPO>#<PR_NUMBER>." Then stop.
+   - If it exists, read the PID with `cat`, `kill -TERM <pid>` (ignore errors — the process may already have exited), and remove the PID file.
 
-   If no matching PID files exist after all three steps, print: "No babysit pollers are currently running." Then stop.
-
-2. **Terminate the poller(s):** For each PID file located in step 1:
-   - Read the PID with `cat`.
-   - `kill -TERM <pid>` (ignore errors — the process may already have exited).
-   - Remove the PID file.
-
-3. **Print confirmation:**
-   - "Stopped N babysit poller(s)."
+3. **Print confirmation:** "Stopped babysit poller for <REPO>#<PR_NUMBER>."
 
 Then stop — do not continue to Start mode.
 
