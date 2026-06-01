@@ -50,6 +50,8 @@ EXPECTED_BRANCH=$(jq -r '.branch' "$EVENT_FILE")
 REPLY_TO_ID=$(jq -r '.new_comment_ids | max' "$EVENT_FILE")
 ```
 
+**Sanity-check `$REPLY_TO_ID`.** A well-formed event always has at least one entry in `new_comment_ids`, so `$REPLY_TO_ID` should be a positive integer. If it is empty or the literal string `null` (a malformed or manually-replayed event with an empty `new_comment_ids` array), do **not** continue — every reply path below posts to `repos/.../comments/${REPLY_TO_ID}/replies`, and `.../comments/null/replies` 404s. STOP and go directly to the Return section with summary `Skipped: event has no new_comment_ids to reply to`.
+
 ## Step 1: Understand Context
 
 1. Read the full `comments` array as a conversation. Understand the progression of the discussion from the first comment to the last.
@@ -105,16 +107,26 @@ You are not confident in either agree or disagree, OR any of the following apply
 
 **Branch verification (defense-in-depth).** Before doing anything that mutates the repo, verify the worktree is on the expected branch. The orchestrating session already checked, but the worker is what actually runs `git commit`, so re-check.
 
-Read the current branch and compare to `$EXPECTED_BRANCH` (already extracted in Step 0):
+Read the current branch:
 
 ```
 CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
 echo "expected=$EXPECTED_BRANCH current=$CURRENT_BRANCH"
 ```
 
-**If `$CURRENT_BRANCH` does not equal `$EXPECTED_BRANCH`: STOP.** Do not run any further shell commands. Do not call `gh api`, do not edit files, do not commit. Skip the rest of Step 3 entirely and go directly to the Return section with the summary `Branch mismatch: expected <expected>, got <current>`. (A bash `exit 0` only ends the shell subprocess — your reasoning would otherwise continue executing the steps below, including `git commit` on the wrong branch.)
+Then handle the result in **three** cases — they are not all the same:
 
-If the branches match, proceed.
+1. **`$CURRENT_BRANCH` equals `$EXPECTED_BRANCH`** → proceed normally.
+
+2. **`$CURRENT_BRANCH` is `DETACHED`** (sub-agents occasionally start on a detached HEAD) → this is recoverable. Re-attach and continue:
+   ```
+   git checkout "$EXPECTED_BRANCH"
+   ```
+   Re-read `CURRENT_BRANCH` and confirm it now equals `$EXPECTED_BRANCH`. If the checkout succeeded, proceed normally. If the checkout **fails** (e.g. local changes would be overwritten, branch missing), treat it as case 3.
+
+3. **`$CURRENT_BRANCH` is a different *named* branch** (e.g. `feat/other`) → this is the dangerous case: committing review fixes here would land them on an unrelated branch. **STOP.** Do not edit files, do not commit, do not call `gh api`. Skip the rest of Step 3 and go directly to the Return section with summary `Branch mismatch: expected <expected>, got <current>`. (A bash `exit 0` only ends the shell subprocess — your reasoning would otherwise keep executing the steps below, committing on the wrong branch — so this is a reasoning-level stop, not a shell exit.)
+
+Only once you are confirmed on `$EXPECTED_BRANCH` do you proceed.
 
 All actions post a **single reply** to the last new comment in the thread — the comment with the highest `id` in `new_comment_ids`. `$REPLY_TO_ID` (extracted in Step 0) holds that value. Posting one reply at the bottom keeps the conversation clean; address the thread holistically, not just the last comment.
 

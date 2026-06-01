@@ -58,7 +58,19 @@ CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
 echo "expected=$EXPECTED_BRANCH current=$CURRENT_BRANCH"
 ```
 
-**If `$CURRENT_BRANCH` does not equal `$EXPECTED_BRANCH`: STOP.** Do not run any further shell commands. Do not call `gh`, `bk`, edit files, retry jobs, or post comments. Skip directly to the Return section with the summary `Branch mismatch: expected <expected>, got <current>`. (A bash `exit 0` only ends the shell subprocess — your reasoning would otherwise continue executing the steps below, possibly committing or retrying against the wrong worktree state.)
+Handle the result in **three** cases:
+
+1. **`$CURRENT_BRANCH` equals `$EXPECTED_BRANCH`** → proceed to Step 1.
+
+2. **`$CURRENT_BRANCH` is `DETACHED`** (sub-agents occasionally start on a detached HEAD) → recoverable. Re-attach and continue:
+   ```
+   git checkout "$EXPECTED_BRANCH"
+   ```
+   Re-read `CURRENT_BRANCH`; if it now equals `$EXPECTED_BRANCH`, proceed. If the checkout fails, treat it as case 3.
+
+3. **`$CURRENT_BRANCH` is a different *named* branch** → dangerous; a fix commit would land on the wrong branch. **STOP.** Do not call `gh`, `bk`, edit files, retry jobs, or post comments. Skip directly to the Return section with summary `Branch mismatch: expected <expected>, got <current>`. (A bash `exit 0` only ends the shell subprocess — your reasoning would otherwise keep executing the steps below, so this is a reasoning-level stop.)
+
+Only once confirmed on `$EXPECTED_BRANCH` do you proceed.
 
 ---
 

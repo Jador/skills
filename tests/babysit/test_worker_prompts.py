@@ -115,6 +115,32 @@ def test_worker_prompts_use_heredoc_not_single_quote_eventjson():
         )
 
 
+def test_worker_prompts_reattach_on_detached_head():
+    # Detached HEAD is the observed real trigger and is recoverable —
+    # the worker must `git checkout "$EXPECTED_BRANCH"` and continue,
+    # not abort and force a re-run. A genuinely different named branch
+    # still refuses. Assert both behaviors are documented.
+    for prompt in (COMMENT_PROMPT, BUILD_PROMPT):
+        text = prompt.read_text()
+        assert 'git checkout "$EXPECTED_BRANCH"' in text, (
+            f"{prompt.name} should re-attach on DETACHED HEAD, not abort"
+        )
+        assert "DETACHED" in text and "different" in text.lower(), (
+            f"{prompt.name} must distinguish DETACHED (recover) from a "
+            "different named branch (refuse)"
+        )
+
+
+def test_comment_prompt_guards_reply_to_id_null():
+    # REPLY_TO_ID derives from `.new_comment_ids | max`, which is the
+    # string "null" for an empty array. Posting to
+    # comments/null/replies 404s. The prompt must guard against it.
+    text = COMMENT_PROMPT.read_text()
+    assert "comments/null/replies" in text or "no new_comment_ids" in text, (
+        "comment prompt must guard REPLY_TO_ID against the null/empty case"
+    )
+
+
 def _fenced_code_blocks(text: str) -> list[str]:
     """Return the bodies of all triple-fenced code blocks in `text`.
 
