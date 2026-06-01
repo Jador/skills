@@ -146,12 +146,10 @@ events_before=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM seen_events;")
 
 for dir in "${LEGACY_DIRS[@]}"; do
     [[ -d "$dir" ]] || continue
-    # Skip if this is the same dir as our backup root path (avoid recursive re-import).
-    case "$dir" in
-        "${BABYSIT_DIR}"|"${BABYSIT_DIR}/")
-            # Allow scanning live dir, but skip the backup tree inside it.
-            ;;
-    esac
+    # The live BABYSIT_DIR is scanned too, but recursive re-import of the
+    # backup tree is prevented by the `find -maxdepth 1` below: the backup
+    # root lives at ${BABYSIT_DIR}/legacy-backup/<date>/, which is deeper
+    # than depth 1, so the *-seen-*.json globs never reach it.
     dirs_scanned=$((dirs_scanned + 1))
 
     dir_basename="$(basename "$dir")"

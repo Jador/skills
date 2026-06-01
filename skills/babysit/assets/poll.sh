@@ -61,6 +61,14 @@ if [[ "$NO_COMMENTS" == "true" && "$NO_BUILDS" == "true" ]]; then
   exit 1
 fi
 
+# --interval feeds `sleep "$INTERVAL"` at the end of every cycle. A
+# non-numeric value would abort the loop on the first sleep. Orchestration
+# always passes 120, but guard it like every other input.
+if [[ ! "$INTERVAL" =~ ^[0-9]+$ ]]; then
+  echo '{"type":"error","kind":"init","pr":null,"message":"--interval must be a positive integer."}'
+  exit 1
+fi
+
 ###############################################################################
 # Startup: auto-detect repo, PR, branch from cwd
 ###############################################################################

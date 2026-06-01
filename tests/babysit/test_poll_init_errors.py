@@ -118,6 +118,20 @@ def test_init_error_when_pr_value_is_non_numeric(plugin_data: Path,
     assert "not numeric" in payload["message"]
 
 
+def test_non_numeric_interval_rejected(plugin_data: Path, tmp_path: Path):
+    # --interval feeds `sleep "$INTERVAL"`; a non-numeric value would
+    # abort the loop. Guard it like every other input.
+    bin_dir = tmp_path / "bin"
+    _write_fake_gh(bin_dir)
+
+    result = _run_poll("--no-builds", "--interval", "abc",
+                       env_extra=_base_env(plugin_data, bin_dir))
+    assert result.returncode == 1
+    payload = json.loads(result.stdout.strip().splitlines()[0])
+    assert payload["kind"] == "init"
+    assert "interval" in payload["message"].lower()
+
+
 def test_init_error_when_pipeline_missing_carries_pr_int(plugin_data: Path,
                                                          tmp_path: Path):
     bin_dir = tmp_path / "bin"
