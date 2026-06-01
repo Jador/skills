@@ -134,12 +134,16 @@ All actions post a **single reply** to the last new comment in the thread — th
 
 1. **Make the code change** in the file(s) indicated by the thread discussion.
 2. **Run project verification** — tests, lint, typecheck, or whatever the project uses. Discover the correct commands from the project's tooling (e.g., package.json scripts, Makefile targets, CI config). Fix any verification failures before proceeding.
-3. **Commit** with a descriptive message:
+3. **Commit** with a descriptive message. Other workers may be running in parallel in this same worktree, so the commit MUST be a single atomic, `flock`-serialized command scoped to **only your files** — never a bare `git add` followed by a separate `git commit`:
    ```
-   git add <files>
-   git commit -m "Address review feedback: <brief description of change>"
+   flock "$(git rev-parse --git-dir)/babysit-commit.lock" -c \
+     'git add -- <files> && git commit -- <files> -m "Address review feedback: <brief description of change>"'
    ```
-   **Do NOT push.** The orchestrating session owns the push (or it happens out-of-band). The worker stops at commit.
+   Why each piece matters:
+   - `flock …/babysit-commit.lock` serializes the commit against other parallel workers in this worktree, so no two `git commit`s race on `.git/index.lock`.
+   - `-- <files>` (an explicit pathspec on **both** `add` and `commit`) guarantees you commit only the files you changed, even if another worker has staged its own files in the shared index.
+
+   **Do NOT push.** The orchestrating session owns the push once all workers in the batch have returned (pushing from parallel workers would race). The worker stops at commit.
 4. **Reply** to the last new comment confirming the fix via `gh api`. Use the just-committed SHA from `git rev-parse --short HEAD`:
    ```
    gh api "repos/${REPO}/pulls/${PR}/comments/${REPLY_TO_ID}/replies" \

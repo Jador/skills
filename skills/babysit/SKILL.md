@@ -18,6 +18,7 @@ Before doing anything, verify the environment:
 3. **Check `jq` is available:** Run `which jq`. If it fails, tell the user: "The `jq` CLI is required but not found on your PATH. Install it via your package manager and try again." Then stop.
 4. **Check `sqlite3` is available:** Run `which sqlite3`. If it fails, tell the user: "The `sqlite3` CLI is required but not found on your PATH. Install it via your package manager and try again." Then stop.
 5. **Check `python3` is available:** Run `which python3`. If it fails, tell the user: "`python3` is required but not found on your PATH. Install it via your package manager and try again." Then stop. `python3` runs `assets/db.py`, the bound-parameter SQLite helper that owns all DB writes.
+6. **Check `flock` is available:** Run `which flock`. If it fails, tell the user: "The `flock` CLI is required so parallel comment/build workers can commit safely in the shared worktree. Install it with `brew install flock` and try again." Then stop.
 
 ### First-time setup after upgrade
 
@@ -69,6 +70,8 @@ Babysit is a hybrid observer + session pattern with three roles:
 
 There are no per-PR locks and no second long-running LLM process spawned by `poll.sh`. Everything that requires the LLM happens inside your session or inside the worker sub-agents you spawn.
 
+**Concurrency.** Workers are dispatched in parallel but share one git worktree, so each commits via a `flock`-serialized, pathspec-scoped command (see the worker prompts) and the session owns the single push. Rationale and the revisit criteria live in `assets/CONCURRENCY.md`.
+
 ### Mode: Stop
 
 If the remaining text is `stop` (case-insensitive):
@@ -93,7 +96,7 @@ Then stop — do not continue to Start mode.
 
 If the remaining text is `clean` (case-insensitive):
 
-Clean mode delegates DB writes to `db.py` (the CLI at `${CLAUDE_SKILL_DIR}/assets/db.py`) and sweeps stale filesystem artifacts from this skill and from the agent-teams harness. The `--dry-run` flag skips every destructive call — read-only queries and `ls`/`stat` checks still run so the dry-run summary is accurate. Ensure `BABYSIT_STATE_DB` is set or pass `--db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"` to each call (the examples below pass `--db` explicitly).
+Clean mode delegates DB writes to `db.py` (the CLI at `${CLAUDE_SKILL_DIR}/assets/db.py`) and sweeps this skill's own stale poll logs. The `--dry-run` flag skips every destructive call — read-only queries and `ls`/`stat` checks still run so the dry-run summary is accurate. Ensure `BABYSIT_STATE_DB` is set or pass `--db "${CLAUDE_PLUGIN_DATA}/babysit/state.db"` to each call (the examples below pass `--db` explicitly).
 
 If `--dry-run` was specified, print a banner first:
 
@@ -101,7 +104,7 @@ If `--dry-run` was specified, print a banner first:
 === DRY RUN — no changes will be written ===
 ```
 
-1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, skip steps 2–5 (DB cleanup) but still run steps 6–7 (filesystem sweeps). If both the DB is missing AND no stale filesystem artifacts are found, print: "No babysit state found." Then stop.
+1. **Locate the state database:** The database lives at `${CLAUDE_PLUGIN_DATA}/babysit/state.db`. If the file does not exist, skip steps 2–5 (DB cleanup) but still run step 6 (the poll-log sweep). If both the DB is missing AND no stale poll logs are found, print: "No babysit state found." Then stop.
 
 2. **Collect tracked (repo, PR) pairs:** Ask the CLI for every (repo, PR) pair ever recorded in `seen_events`:
    ```
@@ -168,12 +171,7 @@ If `--dry-run` was specified, print a banner first:
    - For each match, print: "Would remove old poll log <path>."
    - If `--dry-run` was NOT specified, `rm -f <path>`.
 
-7. **Sweep stale agent-teams orphans:** The agent-teams harness writes scratch directories under `~/.claude/teams/` and `~/.claude/tasks/` that are not cleaned up by every code path. Sweep entries with mtime older than 7 days:
-   - `find ~/.claude/teams -mindepth 1 -maxdepth 1 -mtime +7` and `find ~/.claude/tasks -mindepth 1 -maxdepth 1 -mtime +7` (the directories may not exist — skip silently if `find` reports them missing).
-   - For each match, print: "Would remove stale agent-teams orphan <path>."
-   - If `--dry-run` was NOT specified, `rm -rf <path>`.
-
-8. **Print summary:** Print a final summary block. If `--dry-run` was specified, prefix the summary with the dry-run banner repeated:
+7. **Print summary:** Print a final summary block. If `--dry-run` was specified, prefix the summary with the dry-run banner repeated:
     ```
     === DRY RUN — no changes were written ===
     ```
@@ -182,7 +180,6 @@ If `--dry-run` was specified, print a banner first:
     - Count of PRs preserved (still open)
     - Count of PRs skipped due to transient errors (if any)
     - Count of old poll logs removed
-    - Count of stale agent-teams orphans removed
 
     Example:
     ```
@@ -191,7 +188,6 @@ If `--dry-run` was specified, print a banner first:
     - PRs preserved:     2
     - PRs skipped:       0
     - Logs removed:      14
-    - Orphans removed:   5
     ```
 
 Then stop — do not continue to Start mode.
@@ -359,19 +355,19 @@ Handle each `.type` as follows:
 
 **`error` → surface to the user.** Print a short line of the form `babysit poller error (<kind>): <message>` and then continue reading new events. Do not spawn a sub-agent and do not stop the loop. If `error` events arrive repeatedly with the same `kind`, the user can decide whether to `/babysit stop`.
 
-### Pushing comment fixes
+### Pushing fixes
 
-`comment_thread` workers **commit but do not push** — pushing is the orchestrating session's job (the worker prompt explicitly forbids the worker from pushing so concurrent comment workers cannot race on `git push`). `build_failure` workers push their own fixes, so this step applies to comment workers only.
+Both `comment_thread` and `build_failure` workers **commit but do not push** — pushing is the orchestrating session's job. The worker prompts forbid the worker from pushing because parallel workers would race on `git push`; the session is the single pusher.
 
-When a `comment_thread` worker returns, inspect its report:
+After every worker in a batch has returned, inspect their reports:
 
-- If it reports a landed commit (a non-empty `commit_sha`, or its prose says it committed an AGREE fix), run `git push` from the session once the worker has returned. If multiple comment workers ran in parallel in the same batch, wait for all of them to return, then push **once** — their commits are all on the same branch and a single push carries them all.
-- If the worker reports DISAGREE, ESCALATE, or a branch mismatch (no commit landed), do **not** push.
-- If `git push` fails (rejected, diverged), do not force-push. Surface the failure to the user verbatim: `babysit: push failed after comment fix — resolve manually then re-run /babysit`. The commit stays local; the reviewer's thread already has the worker's reply.
+- If **any** worker reports a landed commit (a non-empty `commit_sha`, or its prose says it committed a fix), run `git push` from the session **once** for the whole batch — all commits are on the same branch, so one push carries them all.
+- If no worker landed a commit (all DISAGREE / ESCALATE / retry / skip / branch mismatch), do **not** push.
+- If `git push` fails (rejected, diverged), do not force-push. Surface the failure to the user verbatim: `babysit: push failed after fixes — resolve manually then re-run /babysit`. The commits stay local; the reviewer threads already have the workers' replies.
 
 ### Parallelism
 
-If a single Monitor notification batches multiple new event lines (because two or more events arrived inside the same poll cycle — Monitor groups stdout lines within 200ms), spawn **all** of the resulting sub-agents in a **single assistant message** with one Agent tool call per event. Do not serialize them. Sub-agents are independent — comment-check on thread A and build-check on build #123 have no shared state to contend for, and running them in parallel is the whole point of the hybrid model.
+If a single Monitor notification batches multiple new event lines (because two or more events arrived inside the same poll cycle — Monitor groups stdout lines within 200ms), spawn **all** of the resulting sub-agents in a **single assistant message** with one Agent tool call per event. Workers share one git worktree but commit safely via `flock` + pathspec (see worker prompts), and the session owns the single push.
 
 If the same notification includes an `error` event alongside `comment_thread` / `build_failure` events, print the error line in the same assistant message as the sub-agent calls — the user-visible text and the tool calls can coexist.
 

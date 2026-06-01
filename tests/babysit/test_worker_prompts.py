@@ -42,6 +42,36 @@ COMMENT_PROMPT = PROMPT_DIR / "comment-check-prompt.md"
 BUILD_PROMPT = PROMPT_DIR / "build-check-prompt.md"
 
 
+def test_worker_commits_are_flock_serialized_and_pathspec_scoped():
+    # Parallel workers share one git worktree. Each commit must be a
+    # single flock-locked command scoped to the worker's own files, or
+    # concurrent commits race on .git/index.lock and a no-pathspec
+    # `git commit` sweeps in another worker's staged files.
+    for prompt in (COMMENT_PROMPT, BUILD_PROMPT):
+        text = prompt.read_text()
+        assert "babysit-commit.lock" in text, (
+            f"{prompt.name} commit must be flock-serialized"
+        )
+        assert "flock" in text and "git rev-parse --git-dir" in text, (
+            f"{prompt.name} must lock on a worktree-local lockfile"
+        )
+        assert "git commit -- <files>" in text, (
+            f"{prompt.name} commit must carry an explicit pathspec"
+        )
+
+
+def test_workers_do_not_push():
+    # Pushing is the session's job; parallel workers pushing would race.
+    # No worker prompt may contain a bare `git push` shell statement.
+    for prompt in (COMMENT_PROMPT, BUILD_PROMPT):
+        for block in _fenced_code_blocks(prompt.read_text()):
+            for line in block.splitlines():
+                assert not line.strip().startswith("git push"), (
+                    f"{prompt.name} contains a `git push` — push is the "
+                    "session's responsibility, not the worker's"
+                )
+
+
 def test_build_escalation_uses_review_comment_feed():
     # The babysit poller only fetches the review-comment feed
     # (pulls/{pr}/comments). A build escalation posted to the

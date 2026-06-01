@@ -117,20 +117,16 @@ A failure is considered **related** if ANY of the following are true:
 3. Determine the minimal fix required. Do not refactor unrelated code.
 4. Apply the fix.
 5. Run the project's verification commands for the affected files — tests, lint, typecheck, or whatever the project uses. Figure out what to run based on the project's tooling (e.g., package.json scripts, Makefile targets, CI config). If verification fails, iterate on the fix until it passes. Do not commit code that doesn't pass verification.
-6. Stage and commit the changes with a descriptive message:
+6. Stage and commit the changes with a descriptive message. Other workers may be running in parallel in this same worktree, so the commit MUST be a single atomic, `flock`-serialized command scoped to **only your files** — never a bare `git add` followed by a separate `git commit`:
 
    ```
-   git add <files>
-   git commit -m "fix: resolve <brief description of the failure>"
+   flock "$(git rev-parse --git-dir)/babysit-commit.lock" -c \
+     'git add -- <files> && git commit -- <files> -m "fix: resolve <brief description of the failure>"'
    ```
+   - `flock …/babysit-commit.lock` serializes the commit against other parallel workers so no two `git commit`s race on `.git/index.lock`.
+   - `-- <files>` (explicit pathspec on **both** `add` and `commit`) guarantees you commit only the files you changed, even if another worker has staged its own files in the shared index.
 
-7. Push the changes:
-
-   ```
-   git push
-   ```
-
-   **If the push fails due to conflicts or rejected updates:** Do NOT force-push. Go to the **Escalate** action path instead.
+7. **Do NOT push.** The orchestrating session owns the push once all workers in the batch have returned — pushing from parallel workers would race, and the session batches the whole batch's commits into one push. If the session's push later fails (conflicts, rejected updates), the session handles it; never force-push from the worker.
 
 8. Capture the new commit SHA for the report:
 
@@ -170,7 +166,7 @@ Choose this when ANY of the following are true:
 
 - You are **not confident** in the assessment (unclear whether related or flaky).
 - **Freeform instructions** direct escalation for this case.
-- A **push failed** due to conflicts during a fix attempt.
+- A **commit failed** during a fix attempt (push is the session's responsibility, not the worker's).
 
 **Steps:**
 
@@ -202,7 +198,8 @@ Choose this when ANY of the following are true:
 
 ## Important Rules
 
-- **Never force-push.** If a regular `git push` fails, escalate. Never use `git push --force` or `git push --force-with-lease`.
+- **Never push.** Pushing is the orchestrating session's job; the worker stops at the `flock`-serialized commit. Never run `git push` (and never `--force`/`--force-with-lease`).
+- **Commit only your own files** via the `flock`-locked, pathspec-scoped command in the Fix path — never a bare `git add`/`git commit` that could sweep in a parallel worker's staged changes.
 - **Conservative fixes only.** Only change what is necessary to fix the failing build. Do not bundle in unrelated improvements or refactors.
 - **No state writes.** Do NOT read or write any state file.
 - **Fetch per-job logs only** (`bk job log <job_id>`), not full build output.
@@ -219,7 +216,7 @@ Suggested fields to include if you do produce JSON:
 
 - `action` — one of `fix`, `retry`, `skip`, `escalate`, or `branch_mismatch`.
 - `files_touched` — array of file paths modified during a fix; empty `[]` otherwise.
-- `commit_sha` — pushed commit SHA on fix; empty string otherwise.
+- `commit_sha` — committed SHA on fix (the session pushes it); empty string otherwise.
 - `summary` — one-line human-readable description of what you did.
 
 Example summaries:
@@ -227,5 +224,5 @@ Example summaries:
 - Fix: `"Fixed lint failure in build #789 (sha abc1234)"`
 - Retry: `"Retried flaky geocoding test in build #790"`
 - Skip: `"Skipped unrelated failure in build #791 — pre-existing test failure on main"`
-- Escalate: `"Escalated build #792 — push failed due to merge conflict"`
+- Escalate: `"Escalated build #792 — commit failed during fix attempt"`
 - Branch mismatch: `"Branch mismatch: expected feat/x, got main"`
