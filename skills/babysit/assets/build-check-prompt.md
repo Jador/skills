@@ -117,22 +117,17 @@ A failure is considered **related** if ANY of the following are true:
 3. Determine the minimal fix required. Do not refactor unrelated code.
 4. Apply the fix.
 5. Run the project's verification commands for the affected files — tests, lint, typecheck, or whatever the project uses. Figure out what to run based on the project's tooling (e.g., package.json scripts, Makefile targets, CI config). If verification fails, iterate on the fix until it passes. Do not commit code that doesn't pass verification.
-6. Stage and commit the changes with a descriptive message. Other workers may be running in parallel in this same worktree, so the commit MUST be a single atomic, `flock`-serialized command scoped to **only your files** — never a bare `git add` followed by a separate `git commit`:
+6. Stage and commit the changes with a descriptive message, capturing the SHA **inside** the same lock. Other workers may be running in parallel in this same worktree, so the commit MUST be a single atomic, `flock`-serialized command scoped to **only your files** — never a bare `git add` followed by a separate `git commit`, and never a `git rev-parse` after the lock releases (a sibling worker's commit could be `HEAD` by then):
 
    ```
-   flock "$(git rev-parse --git-dir)/babysit-commit.lock" -c \
-     'git add -- <files> && git commit -- <files> -m "fix: resolve <brief description of the failure>"'
+   COMMIT_SHA=$(flock "$(git rev-parse --git-dir)/babysit-commit.lock" -c \
+     'git add -- <files> && git commit -- <files> -m "fix: resolve <brief description of the failure>" >&2 && git rev-parse HEAD')
    ```
    - `flock …/babysit-commit.lock` serializes the commit against other parallel workers so no two `git commit`s race on `.git/index.lock`.
    - `-- <files>` (explicit pathspec on **both** `add` and `commit`) guarantees you commit only the files you changed, even if another worker has staged its own files in the shared index.
+   - `git commit … >&2` keeps commit chatter off stdout so `COMMIT_SHA` is just the `rev-parse` output, captured inside the lock so `HEAD` is still your commit.
 
 7. **Do NOT push.** The orchestrating session owns the push once all workers in the batch have returned — pushing from parallel workers would race, and the session batches the whole batch's commits into one push. If the session's push later fails (conflicts, rejected updates), the session handles it; never force-push from the worker.
-
-8. Capture the new commit SHA for the report:
-
-   ```
-   COMMIT_SHA=$(git rev-parse HEAD)
-   ```
 
 ### Retry (flaky/unrelated test)
 

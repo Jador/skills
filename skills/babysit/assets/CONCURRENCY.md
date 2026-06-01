@@ -24,6 +24,17 @@ shared git worktree safe by:
    prerequisite (`brew install flock`).
 3. A **single session-owned push** after the batch drains. Workers never
    push — that would race — so the session pushes once for the whole batch.
+   AGREE comment workers also defer their confirmation reply: they return a
+   `pending_reply` and the session posts it only after the push succeeds, so
+   a `Fixed in <sha>` reference never points at an unpushed (or never-pushed,
+   on push failure) commit. The commit SHA is captured *inside* the flock'd
+   commit command, because a `git rev-parse` after the lock releases could
+   read a sibling worker's commit as HEAD. We deliberately do **not**
+   `git pull --rebase` before the push: in this single-user, one-poller-per-PR
+   model the remote rarely advances mid-session, and an unattended rebase can
+   leave a conflicted worktree — a plain push with a "resolve manually"
+   fallback is safer than auto-rebasing blind. (v1.10.3 pushed + rebased
+   per-worker; that was both racy and rebase-unsafe under parallel workers.)
 
 ## Why not the alternatives
 

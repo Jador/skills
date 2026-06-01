@@ -355,15 +355,20 @@ Handle each `.type` as follows:
 
 **`error` → surface to the user.** Print a short line of the form `babysit poller error (<kind>): <message>` and then continue reading new events. Do not spawn a sub-agent and do not stop the loop. If `error` events arrive repeatedly with the same `kind`, the user can decide whether to `/babysit stop`.
 
-### Pushing fixes
+### Pushing fixes and posting AGREE replies
 
-Both `comment_thread` and `build_failure` workers **commit but do not push** — pushing is the orchestrating session's job. The worker prompts forbid the worker from pushing because parallel workers would race on `git push`; the session is the single pusher.
+Both `comment_thread` and `build_failure` workers **commit but do not push** — pushing is the orchestrating session's job. The worker prompts forbid the worker from pushing because parallel workers would race on `git push`; the session is the single pusher. A `comment_thread` worker that classified AGREE also **does not post its confirmation reply** — it returns a `pending_reply` object instead, so the reply's `Fixed in <sha>` reference can be posted only after the commit is actually on the remote.
 
-After every worker in a batch has returned, inspect their reports:
+After every worker in the batch has returned:
 
-- If **any** worker reports a landed commit (a non-empty `commit_sha`, or its prose says it committed a fix), run `git push` from the session **once** for the whole batch — all commits are on the same branch, so one push carries them all.
-- If no worker landed a commit (all DISAGREE / ESCALATE / retry / skip / branch mismatch), do **not** push.
-- If `git push` fails (rejected, diverged), do not force-push. Surface the failure to the user verbatim: `babysit: push failed after fixes — resolve manually then re-run /babysit`. The commits stay local; the reviewer threads already have the workers' replies.
+1. **Push once, if anything landed.** If **any** worker reports a landed commit (non-empty `commit_sha`), run `git push` from the session **once** for the whole batch — all commits are on the same branch, so one push carries them all. If no worker landed a commit (all DISAGREE / ESCALATE / retry / skip / branch mismatch), skip to nothing — there is nothing to push or post.
+2. **On push success, post the deferred AGREE replies.** For each `comment_thread` worker that returned a `pending_reply`, post it now:
+   ```
+   gh api "repos/<repo>/pulls/<pr>/comments/<reply_to_id>/replies" \
+     --method POST -f body="<pending_reply.body>"
+   ```
+   Use the `repo`/`pr` from that worker's event and the `reply_to_id`/`body` from its `pending_reply`. The SHA in the body is now guaranteed on the remote. (DISAGREE/ESCALATE replies were already posted inline by the worker and need no action here.)
+3. **On push failure** (rejected, diverged), do **not** force-push and do **not** post the `pending_reply` replies — their SHAs would dangle. Surface the failure to the user verbatim: `babysit: push failed after fixes — resolve manually then re-run /babysit`. The commits stay local; nothing references an unpushed SHA.
 
 ### Parallelism
 

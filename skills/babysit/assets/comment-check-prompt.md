@@ -130,28 +130,27 @@ Only once you are confirmed on `$EXPECTED_BRANCH` do you proceed.
 
 All actions post a **single reply** to the last new comment in the thread — the comment with the highest `id` in `new_comment_ids`. `$REPLY_TO_ID` (extracted in Step 0) holds that value. Posting one reply at the bottom keeps the conversation clean; address the thread holistically, not just the last comment.
 
-### If AGREE — Fix, Verify, Commit, Reply
+### If AGREE — Fix, Verify, Commit, Return reply for the session to post
 
 1. **Make the code change** in the file(s) indicated by the thread discussion.
 2. **Run project verification** — tests, lint, typecheck, or whatever the project uses. Discover the correct commands from the project's tooling (e.g., package.json scripts, Makefile targets, CI config). Fix any verification failures before proceeding.
-3. **Commit** with a descriptive message. Other workers may be running in parallel in this same worktree, so the commit MUST be a single atomic, `flock`-serialized command scoped to **only your files** — never a bare `git add` followed by a separate `git commit`:
+3. **Commit, and capture the short SHA inside the same lock.** Other workers may be running in parallel in this same worktree, so the commit MUST be a single atomic, `flock`-serialized command scoped to **only your files** — never a bare `git add` followed by a separate `git commit`. Capture the SHA **inside** the locked command too: a separate `git rev-parse` after the lock is released could read a sibling worker's commit as `HEAD`.
    ```
-   flock "$(git rev-parse --git-dir)/babysit-commit.lock" -c \
-     'git add -- <files> && git commit -- <files> -m "Address review feedback: <brief description of change>"'
+   SHORT_SHA=$(flock "$(git rev-parse --git-dir)/babysit-commit.lock" -c \
+     'git add -- <files> && git commit -- <files> -m "Address review feedback: <brief description of change>" >&2 && git rev-parse --short HEAD')
    ```
    Why each piece matters:
-   - `flock …/babysit-commit.lock` serializes the commit against other parallel workers in this worktree, so no two `git commit`s race on `.git/index.lock`.
+   - `flock …/babysit-commit.lock` serializes the commit against other parallel workers, so no two `git commit`s race on `.git/index.lock`.
    - `-- <files>` (an explicit pathspec on **both** `add` and `commit`) guarantees you commit only the files you changed, even if another worker has staged its own files in the shared index.
+   - `git commit … >&2` sends commit chatter to stderr so the only thing on stdout (captured into `SHORT_SHA`) is the `rev-parse` output, and `rev-parse` runs **inside** the lock so `HEAD` is still your commit.
 
-   **Do NOT push.** The orchestrating session owns the push once all workers in the batch have returned (pushing from parallel workers would race). The worker stops at commit.
-4. **Reply** to the last new comment confirming the fix via `gh api`. Use the just-committed SHA from `git rev-parse --short HEAD`:
+   **Do NOT push, and do NOT post the reply yourself.** The orchestrating session pushes once after the whole batch returns, then posts your reply — so the `Fixed in <SHORT_SHA>` reference is guaranteed to be on the remote (posting it yourself now would reference an unpushed commit if the session's push later fails).
+4. **Return the reply for the session to post** (see the Return section). Provide a `pending_reply` object with `reply_to_id` = `$REPLY_TO_ID` and `body` = the exact reply text below — do not call `gh api` yourself:
    ```
-   gh api "repos/${REPO}/pulls/${PR}/comments/${REPLY_TO_ID}/replies" \
-     --method POST \
-     -f body="<!-- babysit-agent -->
+   <!-- babysit-agent -->
    > [!NOTE]
    > ### [ 🤖💬 ]
-   > Fixed in <SHORT_SHA>. <Brief description of what was changed, addressing the thread discussion.>"
+   > Fixed in <SHORT_SHA>. <Brief description of what was changed, addressing the thread discussion.>
    ```
 
 ### If DISAGREE — Reply with Rationale
@@ -184,28 +183,27 @@ All actions post a **single reply** to the last new comment in the thread — th
 
 1. **The orchestrating session owns all state writes.** The worker MUST NOT write to any state file, MUST NOT write under the plugin data directory, and MUST NOT write any seen-comments file.
 2. **One commit per thread** — this sub-agent handles exactly one thread event. All code changes from the thread are addressed in a single commit.
-3. **Do not push.** The worker stops at commit; the orchestrating session (or operator) is responsible for pushing.
+3. **Do not push, and do not post the AGREE reply.** The worker stops at commit and returns the reply text; the orchestrating session pushes and then posts the AGREE reply (so its `Fixed in <sha>` always references a pushed commit). DISAGREE and ESCALATE replies have no commit to order against, so the worker posts those inline as shown.
 4. **Verify the branch before committing.** Run the `git symbolic-ref --short HEAD` check at the top of Step 3 and abort with the Branch-mismatch report if it does not equal the event's `branch`.
 5. **Be conservative in disagreements** — only disagree when you have strong evidence. When in doubt, agree or escalate.
 6. **Do not modify files outside the scope of the thread discussion** — only change what the thread conversation asks about.
-7. **All posted comments MUST include `<!-- babysit-agent -->` on the first line** of the body. This marker is used by the polling script to skip self-authored comments and prevent infinite loops.
-8. **All posted comments MUST include the appropriate emoji in the callout header**: `🤖💬` for agree and disagree responses, `🤖✋` for escalation notices.
+7. **Every babysit-authored comment body MUST include `<!-- babysit-agent -->` on the first line** — whether the worker posts it (DISAGREE/ESCALATE) or hands it to the session (AGREE `pending_reply`). The polling script uses this marker to skip self-authored comments and prevent infinite loops.
+8. **Every babysit-authored comment body MUST include the appropriate emoji in the callout header**: `🤖💬` for agree and disagree responses, `🤖✋` for escalation notices.
 9. **If the thread contains contradictory requests, escalate.** Do not attempt to reconcile conflicting reviewer feedback — this requires human judgment.
 
 ## Return
 
-Report back to the orchestrating session with a short summary of what you did. Prose is fine; structured fields are optional.
+Report back to the orchestrating session with a short summary of what you did, plus the structured fields below. For **AGREE the `pending_reply` field is required** — it is how the session posts your confirmation after it pushes. For DISAGREE/ESCALATE/Branch-mismatch the worker has already posted (or posted nothing), so `pending_reply` is omitted.
 
-Suggested fields to include if you do produce JSON:
-
+- `pending_reply` — **AGREE only.** An object `{ "reply_to_id": <REPLY_TO_ID>, "body": "<the Fixed in … reply text, marker on first line>" }`. The session posts this verbatim to `repos/{repo}/pulls/{pr}/comments/{reply_to_id}/replies` after its push succeeds. Omit for non-AGREE.
 - `files_touched` — output of `git diff --name-only HEAD~1 HEAD` after the worker's commit. Empty list if no commit landed (DISAGREE, ESCALATE, or Branch mismatch).
-- `commit_sha` — output of `git rev-parse HEAD` after commit. Empty string if no commit landed.
+- `commit_sha` — the short SHA captured inside the locked commit (`$SHORT_SHA`). Empty string if no commit landed.
 - `summary` — one-line human-readable description of what happened.
 
 Example summaries:
 
-- `"Fixed 2 comments from alice in thread on utils.ts (sha abc1234)"`
-- `"Disagreed with carol's thread on api.ts: cosmetic change, unnecessary churn"`
-- `"Escalated dave's architecture thread on server.ts — needs owner sign-off"`
+- `"Fixed 2 comments from alice in thread on utils.ts (sha abc1234) — reply returned for session to post"`
+- `"Disagreed with carol's thread on api.ts: cosmetic change, unnecessary churn (replied inline)"`
+- `"Escalated dave's architecture thread on server.ts — needs owner sign-off (replied inline)"`
 - `"Escalated thread on config.ts — contradictory requests from bob and carol"`
 - `"Branch mismatch: expected feat/x, got main"`

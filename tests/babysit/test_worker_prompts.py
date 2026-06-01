@@ -60,6 +60,44 @@ def test_worker_commits_are_flock_serialized_and_pathspec_scoped():
         )
 
 
+def test_commit_sha_captured_inside_flock_lock():
+    # Reading `git rev-parse` AFTER the flock'd commit is racy — a sibling
+    # worker's commit could be HEAD by then. The SHA capture must live
+    # inside the same locked command (… && git commit … && git rev-parse …).
+    for prompt in (COMMENT_PROMPT, BUILD_PROMPT):
+        text = prompt.read_text()
+        # The flock command must chain rev-parse after the commit.
+        assert "git rev-parse --short HEAD')" in text or "git rev-parse HEAD')" in text, (
+            f"{prompt.name} must capture the commit SHA inside the flock'd "
+            "command, not in a separate post-lock rev-parse"
+        )
+
+
+def test_comment_agree_defers_reply_to_session():
+    # AGREE replies reference a SHA; they must be posted by the session
+    # AFTER the push so the SHA is on the remote. The worker returns a
+    # pending_reply rather than posting inline.
+    text = COMMENT_PROMPT.read_text()
+    assert "pending_reply" in text, (
+        "AGREE must return a pending_reply for the session to post post-push"
+    )
+    assert "do NOT post the reply yourself" in text, (
+        "AGREE worker must be told not to post its own reply"
+    )
+
+
+def test_session_posts_agree_replies_after_push():
+    # SKILL.md must instruct the session to push first, then post the
+    # deferred pending_reply replies, and to skip them on push failure.
+    skill = (REPO_ROOT / "skills" / "babysit" / "SKILL.md").read_text()
+    assert "pending_reply" in skill, "session must post deferred AGREE replies"
+    assert "do **not** force-push and do **not** post" in skill or \
+        "do not post the `pending_reply`" in skill or \
+        "skip to nothing" in skill, (
+        "on push failure the session must not post the dangling-SHA replies"
+    )
+
+
 def test_workers_do_not_push():
     # Pushing is the session's job; parallel workers pushing would race.
     # No worker prompt may contain a bare `git push` shell statement.
