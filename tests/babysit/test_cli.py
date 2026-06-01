@@ -3,14 +3,16 @@
 Behavioural contract under test:
 
 1. Each subcommand is reachable and maps to its underlying op
-   (smoke: ``insert_pending`` + ``read_pending`` round trip).
-2. ``--json-stdin`` parses payload (and other structured args) from stdin.
-3. Malformed JSON on stdin → exit 2 with an error JSON on stdout.
-4. Missing ``--db`` and no ``BABYSIT_STATE_DB`` env var → exit 1
+   (smoke: ``insert_seen`` round trip + dedup).
+2. Missing ``--db`` and no ``BABYSIT_STATE_DB`` env var → exit 1
    with a ``DB path not provided`` error JSON.
-5. ``--db`` overrides ``BABYSIT_STATE_DB`` when both are set.
-6. ``purge_pr`` returns the per-table delete counts dict.
-7. ``vacuum`` returns ``{"ok": true}``.
+3. ``--db`` overrides ``BABYSIT_STATE_DB`` when both are set.
+4. ``BABYSIT_STATE_DB`` is honoured when ``--db`` is absent.
+5. ``purge_pr`` returns the seen_events delete count dict and is
+   repo-scoped.
+6. ``vacuum`` returns ``{"ok": true}``.
+7. ``list_distinct_prs`` returns the sorted distinct (repo, pr) pairs as
+   dicts.
 
 The CLI is invoked via ``subprocess.run([sys.executable, db_py, ...])`` so
 the tests exercise the real ``if __name__ == "__main__"`` entrypoint, not
@@ -70,93 +72,120 @@ def db_file(tmp_path: Path) -> Path:
     return path
 
 
-# ---------- smoke: insert then read ----------
+# ---------- smoke: insert_seen ----------
 
-def test_insert_pending_then_read_pending_round_trips(db_file: Path):
-    payload = '{"body": "hello"}'
+def test_insert_seen_returns_rowcount_one_on_new_row(db_file: Path):
     result = _run([
-        "insert_pending",
+        "insert_seen",
         "--db", str(db_file),
+        "--repo", "org-a/foo",
         "--pr", "123",
         "--kind", "comment_thread",
         "--event-id", "evt-1",
-        "--received-ts", "2026-05-22T10:00:00Z",
-        "--payload", payload,
+        "--ts", "2026-05-22T10:00:00Z",
     ])
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
     assert out == {"ok": True, "rows_affected": 1}
 
-    # Now read it back.
-    result = _run([
-        "read_pending",
-        "--db", str(db_file),
-        "--pr", "123",
-    ])
-    assert result.returncode == 0, result.stderr
-    out = json.loads(result.stdout)
-    assert out["ok"] is True
-    assert len(out["rows"]) == 1
-    row = out["rows"][0]
-    assert row["pr"] == 123
-    assert row["kind"] == "comment_thread"
-    assert row["event_id"] == "evt-1"
-    assert row["payload"] == payload
-    assert row["received_ts"] == "2026-05-22T10:00:00Z"
-
-
-# ---------- --json-stdin parsing ----------
-
-def test_insert_pending_with_json_stdin_payload(db_file: Path):
-    payload = '{"body": "from stdin"}'
-    result = _run(
-        [
-            "insert_pending",
-            "--db", str(db_file),
-            "--pr", "7",
-            "--kind", "comment_thread",
-            "--event-id", "evt-stdin",
-            "--received-ts", "2026-05-22T11:00:00Z",
-            "--json-stdin",
-        ],
-        stdin=payload,
-    )
-    assert result.returncode == 0, result.stderr
-    out = json.loads(result.stdout)
-    assert out == {"ok": True, "rows_affected": 1}
-
-    # Verify the payload made it in unchanged.
+    # Verify the row actually landed.
     connection = sqlite3.connect(str(db_file))
     try:
         row = connection.execute(
-            "SELECT payload FROM pending_events WHERE pr = 7"
+            "SELECT repo, pr, kind, event_id, ts FROM seen_events "
+            "WHERE pr = 123"
         ).fetchone()
     finally:
         connection.close()
-    assert row[0] == payload
+    assert row == ("org-a/foo", 123, "comment_thread", "evt-1",
+                   "2026-05-22T10:00:00Z")
 
 
-# ---------- malformed stdin JSON ----------
+def test_insert_seen_dedup_returns_rowcount_zero(db_file: Path):
+    args = [
+        "insert_seen",
+        "--db", str(db_file),
+        "--repo", "org-a/foo",
+        "--pr", "7",
+        "--kind", "comment_thread",
+        "--event-id", "evt-dup",
+        "--ts", "2026-05-22T10:00:00Z",
+    ]
+    first = _run(args)
+    assert first.returncode == 0, first.stderr
+    assert json.loads(first.stdout) == {"ok": True, "rows_affected": 1}
 
-def test_malformed_json_stdin_exits_2_with_error_json(db_file: Path):
-    # commit_worker_report always reads structured JSON from stdin, so
-    # use it as the canonical "stdin must be valid JSON" target.
-    result = _run(
-        [
-            "commit_worker_report",
-            "--db", str(db_file),
-            "--cluster-id", "c1",
-            "--pr", "1",
-            "--commit-sha", "deadbeef",
-            "--summary", "x",
-            "--now-ts", "2026-05-22T12:00:00Z",
-        ],
-        stdin="{not valid json",
-    )
-    assert result.returncode == 2
+    second = _run(args)
+    assert second.returncode == 0, second.stderr
+    assert json.loads(second.stdout) == {"ok": True, "rows_affected": 0}
+
+
+def test_insert_seen_batch_round_trip(db_file: Path):
+    result = _run([
+        "insert_seen_batch",
+        "--db", str(db_file),
+        "--repo", "org-a/foo",
+        "--pr", "42",
+        "--kind", "comment",
+        "--ts", "2026-05-22T10:00:00Z",
+        "--event-ids", "100", "101", "102",
+    ])
+    assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
-    assert out["ok"] is False
-    assert "error" in out
+    assert out == {"ok": True, "rows_affected": 3}
+
+    connection = sqlite3.connect(str(db_file))
+    try:
+        rows = connection.execute(
+            "SELECT event_id FROM seen_events WHERE pr = 42 ORDER BY event_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert [r[0] for r in rows] == ["100", "101", "102"]
+
+
+def test_insert_seen_batch_partial_dedup(db_file: Path):
+    # Pre-seed one id; batch contains the same id plus two new ones.
+    _run([
+        "insert_seen",
+        "--db", str(db_file),
+        "--repo", "org-a/foo",
+        "--pr", "42",
+        "--kind", "comment",
+        "--event-id", "100",
+        "--ts", "2026-05-22T10:00:00Z",
+    ])
+
+    result = _run([
+        "insert_seen_batch",
+        "--db", str(db_file),
+        "--repo", "org-a/foo",
+        "--pr", "42",
+        "--kind", "comment",
+        "--ts", "2026-05-22T10:00:00Z",
+        "--event-ids", "100", "101", "102",
+    ])
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out == {"ok": True, "rows_affected": 2}
+
+
+def test_insert_seen_same_pr_different_repos_coexist(db_file: Path):
+    base = [
+        "insert_seen",
+        "--db", str(db_file),
+        "--pr", "42",
+        "--kind", "comment",
+        "--event-id", "999",
+        "--ts", "2026-05-22T10:00:00Z",
+    ]
+    first = _run([*base, "--repo", "org-a/foo"])
+    second = _run([*base, "--repo", "org-b/bar"])
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert json.loads(first.stdout) == {"ok": True, "rows_affected": 1}
+    assert json.loads(second.stdout) == {"ok": True, "rows_affected": 1}
 
 
 # ---------- missing --db and no env var ----------
@@ -183,13 +212,13 @@ def test_db_flag_overrides_env_var(tmp_path: Path):
 
     result = _run(
         [
-            "insert_pending",
+            "insert_seen",
             "--db", str(flag_db),
+            "--repo", "org-a/foo",
             "--pr", "1",
             "--kind", "comment_thread",
             "--event-id", "e1",
-            "--received-ts", "2026-05-22T10:00:00Z",
-            "--payload", "x",
+            "--ts", "2026-05-22T10:00:00Z",
         ],
         env_extra={"BABYSIT_STATE_DB": str(env_db)},
     )
@@ -198,13 +227,13 @@ def test_db_flag_overrides_env_var(tmp_path: Path):
     # flag_db got the row.
     c = sqlite3.connect(str(flag_db))
     try:
-        assert c.execute("SELECT COUNT(*) FROM pending_events").fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(*) FROM seen_events").fetchone()[0] == 1
     finally:
         c.close()
     # env_db is untouched.
     c = sqlite3.connect(str(env_db))
     try:
-        assert c.execute("SELECT COUNT(*) FROM pending_events").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM seen_events").fetchone()[0] == 0
     finally:
         c.close()
 
@@ -217,12 +246,12 @@ def test_env_var_used_when_db_flag_absent(tmp_path: Path):
 
     result = _run(
         [
-            "insert_pending",
+            "insert_seen",
+            "--repo", "org-a/foo",
             "--pr", "2",
             "--kind", "comment_thread",
             "--event-id", "e2",
-            "--received-ts", "2026-05-22T10:00:00Z",
-            "--payload", "x",
+            "--ts", "2026-05-22T10:00:00Z",
         ],
         env_extra={"BABYSIT_STATE_DB": str(env_db)},
     )
@@ -233,34 +262,59 @@ def test_env_var_used_when_db_flag_absent(tmp_path: Path):
 
 # ---------- purge_pr ----------
 
-def test_purge_pr_returns_per_table_counts(db_file: Path):
-    # Seed one pending row, then purge.
+def test_purge_pr_returns_seen_events_count(db_file: Path):
+    # Seed one row, then purge.
     _run([
-        "insert_pending",
+        "insert_seen",
         "--db", str(db_file),
+        "--repo", "org-a/foo",
         "--pr", "55",
         "--kind", "comment_thread",
         "--event-id", "e1",
-        "--received-ts", "2026-05-22T10:00:00Z",
-        "--payload", "x",
+        "--ts", "2026-05-22T10:00:00Z",
     ])
 
-    result = _run(["purge_pr", "--db", str(db_file), "--pr", "55"])
+    result = _run([
+        "purge_pr", "--db", str(db_file),
+        "--repo", "org-a/foo", "--pr", "55",
+    ])
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
     assert out["ok"] is True
     counts = out["counts"]
-    # All four tables must be reported.
-    assert set(counts.keys()) == {
-        "seen_events",
-        "pending_events",
-        "clusters",
-        "worker_reports",
+    # Only seen_events is reported under the trimmed surface.
+    assert counts == {"seen_events": 1}
+
+
+def test_purge_pr_repo_scoped(db_file: Path):
+    # Two repos, same PR. Purging one must leave the other intact.
+    for repo in ("org-a/foo", "org-b/bar"):
+        _run([
+            "insert_seen",
+            "--db", str(db_file),
+            "--repo", repo,
+            "--pr", "42",
+            "--kind", "comment",
+            "--event-id", "999",
+            "--ts", "2026-05-22T10:00:00Z",
+        ])
+
+    result = _run([
+        "purge_pr", "--db", str(db_file),
+        "--repo", "org-a/foo", "--pr", "42",
+    ])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "ok": True, "counts": {"seen_events": 1},
     }
-    assert counts["pending_events"] == 1
-    assert counts["seen_events"] == 0
-    assert counts["clusters"] == 0
-    assert counts["worker_reports"] == 0
+
+    c = sqlite3.connect(str(db_file))
+    try:
+        assert c.execute(
+            "SELECT COUNT(*) FROM seen_events WHERE repo = 'org-b/bar'"
+        ).fetchone()[0] == 1
+    finally:
+        c.close()
 
 
 # ---------- vacuum ----------
@@ -274,25 +328,38 @@ def test_vacuum_returns_ok(db_file: Path):
 
 # ---------- list_distinct_prs ----------
 
-def test_list_distinct_prs_returns_prs_array(db_file: Path):
-    # Seed seen_events directly via sqlite — no CLI op for that yet.
-    c = sqlite3.connect(str(db_file))
-    try:
-        c.execute(
-            "INSERT INTO seen_events (pr, kind, event_id, ts) "
-            "VALUES (?, ?, ?, ?)",
-            (42, "comment_thread", "e1", "2026-05-22T10:00:00Z"),
-        )
-        c.execute(
-            "INSERT INTO seen_events (pr, kind, event_id, ts) "
-            "VALUES (?, ?, ?, ?)",
-            (7, "comment_thread", "e2", "2026-05-22T10:00:00Z"),
-        )
-        c.commit()
-    finally:
-        c.close()
+def test_list_distinct_prs_returns_pairs_array(db_file: Path):
+    # Seed via the CLI itself so we exercise the round trip.
+    for repo, pr, eid in [
+        ("org-a/foo", 42, "e1"),
+        ("org-a/foo", 7, "e2"),
+        ("org-b/bar", 42, "e3"),
+    ]:
+        _run([
+            "insert_seen",
+            "--db", str(db_file),
+            "--repo", repo,
+            "--pr", str(pr),
+            "--kind", "comment_thread",
+            "--event-id", eid,
+            "--ts", "2026-05-22T10:00:00Z",
+        ])
 
     result = _run(["list_distinct_prs", "--db", str(db_file)])
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
-    assert out == {"ok": True, "prs": [7, 42]}
+    assert out == {
+        "ok": True,
+        "prs": [
+            {"repo": "org-a/foo", "pr": 7},
+            {"repo": "org-a/foo", "pr": 42},
+            {"repo": "org-b/bar", "pr": 42},
+        ],
+    }
+
+
+def test_list_distinct_prs_empty_db_returns_empty(db_file: Path):
+    result = _run(["list_distinct_prs", "--db", str(db_file)])
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out == {"ok": True, "prs": []}

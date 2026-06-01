@@ -21,7 +21,7 @@ if [[ -z "${CLAUDE_PLUGIN_DATA:-}" ]]; then
     exit 1
 fi
 
-for tool in sqlite3 jq; do
+for tool in sqlite3 jq shasum; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "ERROR: required tool '$tool' not found on PATH." >&2
         exit 1
@@ -48,6 +48,82 @@ mkdir -p "$BABYSIT_DIR"
 # Redirect stdout to discard the "wal" echo from PRAGMA journal_mode.
 sqlite3 "$DB_FILE" < "$SCHEMA_FILE" >/dev/null
 
+# Silent v2->v3 migration: drop dispatcher/clustering tables and their indexes
+# that existed in the v2 schema but are no longer used. DROP IF EXISTS is
+# idempotent so this is a no-op on fresh v3 databases.
+if [[ -f "$DB_FILE" ]]; then
+    # `.bail on` makes the CLI exit as soon as any statement errors,
+    # so a failure mid-script does not silently leave the database
+    # half-migrated.
+    sqlite3 "$DB_FILE" <<'SQL' >/dev/null
+.bail on
+DROP TABLE IF EXISTS clusters;
+DROP TABLE IF EXISTS worker_reports;
+DROP TABLE IF EXISTS pending_events;
+DROP INDEX IF EXISTS idx_clusters_pr;
+DROP INDEX IF EXISTS idx_clusters_status;
+DROP INDEX IF EXISTS idx_pending_events_pr;
+SQL
+fi
+
+# v2->v3 column upgrade: seen_events gained a `repo` column in its primary key
+# so PR numbers cannot collide across repos. If the existing table predates
+# that change, rebuild it and stamp legacy rows with the 'legacy/unknown'
+# sentinel repo. CREATE IF NOT EXISTS in schema.sql is a no-op when the old
+# table is still present, so this branch is the only place the upgrade runs.
+# Idempotent: on v3 databases the pragma check returns 1 and the body skips.
+has_repo=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM pragma_table_info('seen_events') WHERE name='repo';")
+if [[ "$has_repo" == "0" ]]; then
+    # v2 poll.sh wrote kind='comment_thread'; v3 poll.sh queries
+    # kind='comment'. Without the CASE rewrite below, every legacy
+    # comment-thread row would survive the schema upgrade with its old
+    # kind value, the v3 SELECT would miss it, and the thread would
+    # re-emit on first poll — producing duplicate worker replies on
+    # every previously-handled review thread.
+    # `.bail on` makes the BEGIN/COMMIT genuinely atomic — without it
+    # sqlite3 keeps executing after a per-statement failure, so a
+    # mid-script error (corrupt source row, busy lock) could let DROP
+    # TABLE seen_events_v2 fire and COMMIT against a partial rebuild,
+    # destroying the source data with no rollback. With .bail on the
+    # CLI exits immediately on any error and the transaction is
+    # discarded.
+    sqlite3 "$DB_FILE" <<'SQL' >/dev/null
+.bail on
+BEGIN;
+ALTER TABLE seen_events RENAME TO seen_events_v2;
+CREATE TABLE seen_events (
+    repo TEXT NOT NULL,
+    pr INT,
+    kind TEXT,
+    event_id TEXT,
+    ts TEXT,
+    PRIMARY KEY (repo, pr, kind, event_id)
+);
+INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts)
+    SELECT 'legacy/unknown', pr,
+           CASE kind WHEN 'comment_thread' THEN 'comment' ELSE kind END,
+           event_id, ts
+    FROM seen_events_v2;
+DROP TABLE seen_events_v2;
+COMMIT;
+SQL
+fi
+
+# v2->v3: also remove orphan filesystem artifacts from the old dispatcher
+# (per-burst dispatch logs, per-PR dispatch lockdirs). v3 never reads these;
+# leaving them around just clutters the data dir. Globs are no-ops if nothing
+# matches.
+shopt -s nullglob
+v2_logs=( "${BABYSIT_DIR}"/dispatch-*.log )
+v2_lockdirs=( "${BABYSIT_DIR}"/dispatch-lock-*.d )
+shopt -u nullglob
+if (( ${#v2_logs[@]} > 0 )); then
+    rm -f "${v2_logs[@]}"
+fi
+if (( ${#v2_lockdirs[@]} > 0 )); then
+    rm -rf "${v2_lockdirs[@]}"
+fi
+
 NOW_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # --- (c)-(e) Walk legacy dirs --------------------------------------------
@@ -70,12 +146,10 @@ events_before=$(sqlite3 "$DB_FILE" "SELECT COUNT(*) FROM seen_events;")
 
 for dir in "${LEGACY_DIRS[@]}"; do
     [[ -d "$dir" ]] || continue
-    # Skip if this is the same dir as our backup root path (avoid recursive re-import).
-    case "$dir" in
-        "${BABYSIT_DIR}"|"${BABYSIT_DIR}/")
-            # Allow scanning live dir, but skip the backup tree inside it.
-            ;;
-    esac
+    # The live BABYSIT_DIR is scanned too, but recursive re-import of the
+    # backup tree is prevented by the `find -maxdepth 1` below: the backup
+    # root lives at ${BABYSIT_DIR}/legacy-backup/<date>/, which is deeper
+    # than depth 1, so the *-seen-*.json globs never reach it.
     dirs_scanned=$((dirs_scanned + 1))
 
     dir_basename="$(basename "$dir")"
@@ -105,9 +179,13 @@ for dir in "${LEGACY_DIRS[@]}"; do
     [[ "$total_files" -eq 0 ]] && continue
 
     # Build a single SQL transaction with all UPSERTs for this dir.
+    # `.bail on` keeps the transaction atomic: any per-statement failure
+    # exits the CLI without firing COMMIT, so partial imports never
+    # land on disk.
     sql_tmp="$(mktemp)"
     trap 'rm -f "$sql_tmp"' EXIT
     {
+        echo ".bail on"
         echo "BEGIN;"
         for f in "${comment_files[@]:-}"; do
             [[ -z "$f" ]] && continue
@@ -125,10 +203,15 @@ for dir in "${LEGACY_DIRS[@]}"; do
                 | tostring
             ' "$f" 2>/dev/null); then
                 while IFS= read -r id; do
-                    [[ -z "$id" ]] && continue
-                    # SQL-escape single quotes.
-                    id_esc="${id//\'/\'\'}"
-                    echo "INSERT OR IGNORE INTO seen_events (pr, kind, event_id, ts) VALUES (${pr}, 'comment', '${id_esc}', '${NOW_TS}');"
+                    # GitHub comment ids are integers. Require a purely
+                    # numeric id: this drops empty lines and rejects any
+                    # corrupt value (embedded newline, control char, NUL)
+                    # that single-quote escaping alone would pass through
+                    # into the generated SQL and split the INSERT across
+                    # statements — which, with `.bail on`, rolls back the
+                    # whole directory's import.
+                    [[ "$id" =~ ^[0-9]+$ ]] || continue
+                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'comment', '${id}', '${NOW_TS}');"
                 done <<< "$ids"
             fi
         done
@@ -146,9 +229,10 @@ for dir in "${LEGACY_DIRS[@]}"; do
                 | tostring
             ' "$f" 2>/dev/null); then
                 while IFS= read -r id; do
-                    [[ -z "$id" ]] && continue
-                    id_esc="${id//\'/\'\'}"
-                    echo "INSERT OR IGNORE INTO seen_events (pr, kind, event_id, ts) VALUES (${pr}, 'build', '${id_esc}', '${NOW_TS}');"
+                    # Build numbers are integers — same numeric guard as
+                    # the comment path above.
+                    [[ "$id" =~ ^[0-9]+$ ]] || continue
+                    echo "INSERT OR IGNORE INTO seen_events (repo, pr, kind, event_id, ts) VALUES ('legacy/unknown', ${pr}, 'build_failure', '${id}', '${NOW_TS}');"
                 done <<< "$ids"
             fi
         done
