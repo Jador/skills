@@ -42,6 +42,29 @@ COMMENT_PROMPT = PROMPT_DIR / "comment-check-prompt.md"
 BUILD_PROMPT = PROMPT_DIR / "build-check-prompt.md"
 
 
+def test_build_escalation_uses_review_comment_feed():
+    # The babysit poller only fetches the review-comment feed
+    # (pulls/{pr}/comments). A build escalation posted to the
+    # issue-comment feed (issues/{pr}/comments) would be invisible, so
+    # human replies directing a follow-up fix would never spawn a
+    # worker. The escalation must post a review comment (with a
+    # commit_id + path + subject_type=file anchor) as its primary path.
+    text = BUILD_PROMPT.read_text()
+    assert "pulls/${PR}/comments" in text, (
+        "build escalation must post to the review-comment feed the "
+        "poller reads"
+    )
+    assert "subject_type=file" in text, (
+        "file-level anchor needed since a build failure has no line"
+    )
+    # The issues/ endpoint may still appear, but only as the documented
+    # empty-diff fallback — it must not be the sole escalation path.
+    assert "first file in the PR diff" in text or "empty-diff" in text.lower() \
+        or "diff is empty" in text, (
+        "issues/ endpoint should only remain as an explicit fallback"
+    )
+
+
 def test_heredoc_pattern_round_trips_apostrophe_body(tmp_path: Path):
     """Simulate what a worker would do following the new instructions."""
     # An apostrophe-laden review comment body — the failure case from

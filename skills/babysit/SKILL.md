@@ -367,6 +367,16 @@ Handle each `.type` as follows:
 
 **`error` → surface to the user.** Print a short line of the form `babysit poller error (<kind>): <message>` and then continue reading new events. Do not spawn a sub-agent and do not stop the loop. If `error` events arrive repeatedly with the same `kind`, the user can decide whether to `/babysit stop`.
 
+### Pushing comment fixes
+
+`comment_thread` workers **commit but do not push** — pushing is the orchestrating session's job (the worker prompt explicitly forbids the worker from pushing so concurrent comment workers cannot race on `git push`). `build_failure` workers push their own fixes, so this step applies to comment workers only.
+
+When a `comment_thread` worker returns, inspect its report:
+
+- If it reports a landed commit (a non-empty `commit_sha`, or its prose says it committed an AGREE fix), run `git push` from the session once the worker has returned. If multiple comment workers ran in parallel in the same batch, wait for all of them to return, then push **once** — their commits are all on the same branch and a single push carries them all.
+- If the worker reports DISAGREE, ESCALATE, or a branch mismatch (no commit landed), do **not** push.
+- If `git push` fails (rejected, diverged), do not force-push. Surface the failure to the user verbatim: `babysit: push failed after comment fix — resolve manually then re-run /babysit`. The commit stays local; the reviewer's thread already has the worker's reply.
+
 ### Parallelism
 
 If a single Monitor notification batches multiple new event lines (because two or more events arrived inside the same poll cycle — Monitor groups stdout lines within 200ms), spawn **all** of the resulting sub-agents in a **single assistant message** with one Agent tool call per event. Do not serialize them. Sub-agents are independent — comment-check on thread A and build-check on build #123 have no shared state to contend for, and running them in parallel is the whole point of the hybrid model.

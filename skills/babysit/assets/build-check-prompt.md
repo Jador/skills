@@ -162,10 +162,18 @@ Choose this when ANY of the following are true:
 
 **Steps:**
 
-1. Post an escalation comment on the PR via `gh api`:
+1. Post the escalation as a **review comment** (not an issue comment). The babysit poller only fetches the PR's review-comment feed (`repos/{repo}/pulls/{pr}/comments`); an issue comment would be invisible to it, so any human reply directing a follow-up fix would never spawn a worker. A review comment lands in the polled feed, so replies are ingested like any other thread.
+
+   A build failure has no natural line anchor, so attach the comment at **file level** (`subject_type=file`) on the PR head commit, against the first file in the PR diff:
 
    ```
-   gh api "repos/${REPO}/issues/${PR}/comments" \
+   HEAD_SHA=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')
+   ANCHOR_FILE=$(gh pr diff "$PR" --repo "$REPO" --name-only | head -n1)
+   gh api "repos/${REPO}/pulls/${PR}/comments" \
+     --method POST \
+     -f commit_id="$HEAD_SHA" \
+     -f path="$ANCHOR_FILE" \
+     -f subject_type=file \
      -f body='<!-- babysit-agent -->
    > [!IMPORTANT]
    > ### [ 🤖✋ ]
@@ -176,6 +184,8 @@ Choose this when ANY of the following are true:
 
    The comment MUST include `<!-- babysit-agent -->` on the first line and `🤖✋` in the callout header.
 
+   If the PR diff is empty (no changed files to anchor to), fall back to an issue comment (`gh api "repos/${REPO}/issues/${PR}/comments" -f body=...`) and note in your Return summary that the escalation was posted to the conversation feed, which babysit does not poll for replies.
+
 ---
 
 ## Important Rules
@@ -184,7 +194,7 @@ Choose this when ANY of the following are true:
 - **Conservative fixes only.** Only change what is necessary to fix the failing build. Do not bundle in unrelated improvements or refactors.
 - **No state writes.** Do NOT read or write any state file.
 - **Fetch per-job logs only** (`bk job log <job_id>`), not full build output.
-- **Escalation comments** MUST include `<!-- babysit-agent -->` on the first line and `🤖✋` in the callout header.
+- **Escalation comments** MUST include `<!-- babysit-agent -->` on the first line and `🤖✋` in the callout header, and MUST be posted as a file-level review comment (not an issue comment) so the poller can ingest replies — except the empty-diff fallback noted above.
 - **If any command fails unexpectedly** (e.g., `bk` CLI errors, network issues), escalate with a diagnostic message rather than silently failing.
 
 ---
