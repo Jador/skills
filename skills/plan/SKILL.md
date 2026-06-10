@@ -69,9 +69,15 @@ Present the plan as a fenced markdown block. Tell the user:
 
 Iterate conversationally until the user approves.
 
-### 5. Write the Plan
+### 5. Offer a Design Critique
 
-Once approved:
+Once the user is happy with the plan but before writing it, offer to stress-test it. Use AskUserQuestion:
+- **Run critique**: invoke `/jador:critique plan <slug>` via the Skill tool. A dedicated adversary reviews the plan for soundness — it names the load-bearing assumptions, proposes at least one concrete alternative, and states what would make this the wrong approach. Findings come back conversationally; fold any the user accepts into the plan, then continue.
+- **Skip**: write the plan as-is.
+
+### 6. Write the Plan
+
+Once approved (and after folding in any critique revisions):
 
 1. Write the file to `~/plans/<slug>.md` using the slug from the idea filename.
 2. Confirm the file path to the user.
