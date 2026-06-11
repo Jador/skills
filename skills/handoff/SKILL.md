@@ -2,7 +2,7 @@
 name: handoff
 description: Synthesize or read an agent handoff doc — a living "what actually happened" digest (decisions, deviations, gotchas, open threads) at .claude/agent-handoff.md, uncommitted. Use to package finished work for the next agent, or to load prior context. Invoked manually, and by execute (synthesize at completion) and babysit (read for context).
 argument-hint: [synthesize|read]
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Handoff Skill
