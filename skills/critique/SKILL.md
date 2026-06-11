@@ -2,7 +2,7 @@
 name: critique
 description: Adversarial design review of a plan or a changeset, run in a dedicated skeptical subagent (jador:adversary). Plan mode stress-tests soundness, assumptions, and alternatives before execution; changeset mode reviews the diff for design quality, maintainability, and refactor opportunities at architecture altitude — explicitly NOT style, nits, or minor bugs. Use before committing to a plan, or before opening a PR, to bring an implementation back to soundness.
 argument-hint: [plan <slug> | changeset]
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Critique Skill
