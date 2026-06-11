@@ -323,6 +323,12 @@ Babysitting PR #<PR_NUMBER>. Listening for events…
 
 Substitute `<PR_NUMBER>` with the detected PR number. Keep this line short — it is the only output the user expects before events start arriving. Do not print a multi-line status block, do not print the PID file path.
 
+## Start Mode — Load Handoff Context
+
+Before reacting to events, check for a handoff left by `/jador:execute`. Invoke `/jador:handoff read` via the Skill tool. If it returns a summary, keep it in memory as **handoff context** — what shipped, the decisions and deliberate choices, the gotchas (so a worker does not "fix" something that was intentional), and the open threads (which often predict the very review comments you'll receive). If no handoff is present, proceed without it; this is read-only — never write the handoff from babysit.
+
+When you dispatch workers (next section), prepend the handoff context to each worker's user message the same way you prepend freeform instructions — it gives the worker the author's intent so it doesn't undo a deliberate decision under reviewer pressure.
+
 ## Start Mode — Event Handling
 
 Once the confirmation line is printed, your job is to react to each Monitor notification by dispatching one sub-agent worker per event. This continues for the lifetime of your session (or until the user issues `/babysit stop`).
@@ -349,7 +355,7 @@ There are exactly three event shapes, all emitted by `poll.sh`:
 
 Handle each `.type` as follows:
 
-**`comment_thread` → spawn a comment-check sub-agent.** Use the Agent (sub-agent) tool. Load the worker prompt from `${CLAUDE_SKILL_DIR}/assets/comment-check-prompt.md` and use it as the sub-agent's system prompt / instructions. Pass the event payload as the sub-agent's user message — the JSON line you just parsed, verbatim, inside a fenced ```json block. If freeform instructions were captured during Argument Parsing, prepend them to the user message above the JSON block under a `Freeform instructions:` header so the sub-agent sees them in context.
+**`comment_thread` → spawn a comment-check sub-agent.** Use the Agent (sub-agent) tool. Load the worker prompt from `${CLAUDE_SKILL_DIR}/assets/comment-check-prompt.md` and use it as the sub-agent's system prompt / instructions. Pass the event payload as the sub-agent's user message — the JSON line you just parsed, verbatim, inside a fenced ```json block. If freeform instructions were captured during Argument Parsing, prepend them to the user message above the JSON block under a `Freeform instructions:` header so the sub-agent sees them in context. Likewise, if handoff context was loaded (see "Load Handoff Context" above), prepend it under a `Handoff context:` header so the worker knows the author's intent and deliberate choices.
 
 **`build_failure` → spawn a build-check sub-agent.** Same shape as above, but load the worker prompt from `${CLAUDE_SKILL_DIR}/assets/build-check-prompt.md` instead. Pass the event payload as the user message in a fenced ```json block, with any freeform instructions prepended exactly as for `comment_thread`.
 

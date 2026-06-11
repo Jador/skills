@@ -7,3 +7,7 @@ skills/plan/data/plans/
 # Python bytecode caches (from running pytest)
 __pycache__/
 *.pyc
+
+# Skill-creator eval workspaces (test run artifacts) and eval definitions
+skills/*-workspace/
+skills/*/evals/
