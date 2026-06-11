@@ -8,5 +8,6 @@ skills/plan/data/plans/
 __pycache__/
 *.pyc
 
-# Skill-creator eval workspaces (test run artifacts)
+# Skill-creator eval workspaces (test run artifacts) and eval definitions
 skills/*-workspace/
+skills/*/evals/
