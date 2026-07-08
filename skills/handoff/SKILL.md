@@ -37,10 +37,10 @@ The handoff is keyed by branch so every line of work — per worktree, per branc
    - Call the result `<branch>`.
 3. The handoff path is `<root>/.claude/handoffs/<branch>.md`. (The paired critique lives at `<root>/.claude/critiques/<branch>.md`.)
 4. Ensure the parent directory exists with `mkdir -p "<root>/.claude/handoffs/$(dirname "<branch>")"` — the `mkdir -p` handles nested branch names (the `feat/` in `feat/foo`).
-5. Ensure the handoff directory is locally ignored without touching the shared `.gitignore`: add the **directory** entry `.claude/handoffs/` to `<root>/.git/info/exclude` if absent. Use a guarded write so the entry is never duplicated:
+5. Ensure the handoff directory is locally ignored without touching the shared `.gitignore`: add the **directory** entry `.claude/handoffs/` to the exclude file if absent. Resolve the exclude path with `git rev-parse --git-path info/exclude` — **not** `<root>/.git/info/exclude`, which breaks in worktrees where `.git` is a file (the real exclude lives in the shared common git dir; one entry there covers every worktree and branch). Use a guarded write so the entry is never duplicated:
    ```bash
-   grep -qxF '.claude/handoffs/' "$(git rev-parse --show-toplevel)/.git/info/exclude" \
-     || echo '.claude/handoffs/' >> "$(git rev-parse --show-toplevel)/.git/info/exclude"
+   excl="$(git rev-parse --git-path info/exclude)"
+   grep -qxF '.claude/handoffs/' "$excl" || echo '.claude/handoffs/' >> "$excl"
    ```
 
 ### 3. Synthesize Mode — Gather Inputs
