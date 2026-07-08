@@ -171,14 +171,14 @@ When all tasks are complete (or skipped/failed with no remaining executable task
 - Task K: <title> — <reason>
 ```
 
-3. **Synthesize the handoff (git repos only).** Invoke the handoff skill so whoever picks up the PR inherits full context — what shipped, deviations from the plan, decisions made, gotchas, and open threads. Use the Skill tool to run `/jador:handoff synthesize`; it writes `.claude/agent-handoff.md` in the worktree (uncommitted). Draw the decisions/deviations/gotchas from the sub-agent return summaries and the narrative of this run, not just from the diff — that unstated rationale is the part the next agent can't reconstruct on its own.
+3. **Synthesize the handoff (git repos only).** Invoke the handoff skill so whoever picks up the PR inherits full context — what shipped, deviations from the plan, decisions made, gotchas, and open threads. Use the Skill tool to run `/jador:handoff synthesize`; it writes the branch-keyed `.claude/handoffs/<branch>.md` in the worktree (uncommitted). Draw the decisions/deviations/gotchas from the sub-agent return summaries and the narrative of this run, not just from the diff — that unstated rationale is the part the next agent can't reconstruct on its own.
 
 ### 7. Offer a Design Critique (git repos only)
 
 > **Skip this step entirely if not in a git repository.**
 
 Before offering a PR, offer an adversarial design review of the changeset — cheap insurance against shipping a design that merely works. Use AskUserQuestion:
-- **Run critique**: invoke `/jador:critique changeset` via the Skill tool. It reviews the diff at architecture altitude (not nits/bugs) and writes `.claude/critique.md`. It is advisory — it never blocks or auto-fixes. Surface the findings so the user can decide what to address before the PR.
+- **Run critique**: invoke `/jador:critique changeset` via the Skill tool. It reviews the diff at architecture altitude (not nits/bugs) and writes the branch-keyed `.claude/critiques/<branch>.md`. It is advisory — it never blocks or auto-fixes. Surface the findings so the user can decide what to address before the PR.
 - **Skip**: proceed without a critique.
 
 ### 8. Offer to Open a PR (git repos only)
@@ -195,4 +195,4 @@ If the user chooses to open a PR:
 1. Create the PR: `gh pr create --title "<Plan Title>" --fill`
 2. Print the PR URL to the conversation.
 
-**Stay in the worktree by default — do not call `ExitWorktree` automatically.** The worktree, branch, and the uncommitted `.claude/agent-handoff.md` must persist so the user (or `/jador:babysit`) can keep working from here; exiting would discard the handoff. Only if the user explicitly asks to leave, use `ExitWorktree` with `action: "keep"` (preserves the branch). When you finish, remind the user they're in the plan worktree and can run `/jador:babysit` here once the PR is open.
+**Stay in the worktree by default — do not call `ExitWorktree` automatically.** The worktree, branch, and the uncommitted branch-keyed `.claude/handoffs/<branch>.md` must persist so the user (or `/jador:babysit`) can keep working from here; exiting would discard the handoff. Only if the user explicitly asks to leave, use `ExitWorktree` with `action: "keep"` (preserves the branch). When you finish, remind the user they're in the plan worktree and can run `/jador:babysit` here once the PR is open.

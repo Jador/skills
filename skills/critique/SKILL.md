@@ -35,7 +35,7 @@ If the mode is ambiguous, ask.
 **Changeset mode:**
 1. Resolve the repo root (`git rev-parse --show-toplevel`).
 2. Build the diff: `git diff <base>..HEAD` plus uncommitted changes, where `<base>` is the PR base branch if a PR exists, else the default branch.
-3. Intent = the originating idea/plan (find via branch/slug if present); artifact = the diff. Do **not** read `.claude/agent-handoff.md` yet — that is the cross-check pass.
+3. Intent = the originating idea/plan (find via branch/slug if present); artifact = the diff. Do **not** read the keyed handoff at `<root>/.claude/handoffs/<branch>.md` yet — that is the cross-check pass. Derive `<branch>` using the **Derive the branch path** substep of `skills/handoff/SKILL.md`'s "Locate the Handoff File" (the pure derivation only — do not run that step's `mkdir`/exclude side effects).
 
 ### 3. Run the Adversary — Cold Pass
 
@@ -45,14 +45,14 @@ Spawn the `jador:adversary` subagent (Agent tool, `subagent_type: jador:adversar
 
 > Plan mode skips this step.
 
-Continue the *same* adversary subagent with SendMessage, now providing `<root>/.claude/agent-handoff.md` if it exists. Ask it to reconcile: for each cold finding, is it **defused** by the builder's stated rationale, or does it **stand**? Also surface any choice whose rationale doesn't hold up. If no handoff exists, say so and keep the cold findings.
+Continue the *same* adversary subagent with SendMessage, now providing the keyed handoff at `<root>/.claude/handoffs/<branch>.md` if it exists (derive `<branch>` via the **Derive the branch path** substep of `skills/handoff/SKILL.md`, and apply its **Branch-aware legacy fallback** from "Read Mode — Load and Summarize"). Ask it to reconcile: for each cold finding, is it **defused** by the builder's stated rationale, or does it **stand**? Also surface any choice whose rationale doesn't hold up. If no handoff exists, say so and keep the cold findings.
 
 ### 5. Output the Findings
 
-**Changeset mode:** render `assets/critique-template.md` from the reconciled findings and write it to `<root>/.claude/critique.md`. Keep it out of git the way the handoff is — if `.claude/critique.md` is not already in `<root>/.git/info/exclude`, append it (guarded so it's never duplicated):
+**Changeset mode:** render `assets/critique-template.md` from the reconciled findings and write it to `<root>/.claude/critiques/<branch>.md` (derive `<branch>` via the **Derive the branch path** substep of `skills/handoff/SKILL.md`). Ensure the parent directory exists first with `mkdir -p "<root>/.claude/critiques/$(dirname "<branch>")"` — the `mkdir -p` handles nested branch names (the `feat/` in `feat/foo`). Keep it out of git the way the handoff is — add the **directory** entry `.claude/critiques/` to the exclude file if absent. Resolve the exclude path with `git rev-parse --git-path info/exclude` — **not** `<root>/.git/info/exclude`, which breaks in worktrees where `.git` is a file. Use a guarded write so it's never duplicated:
 ```bash
-grep -qxF '.claude/critique.md' "$(git rev-parse --show-toplevel)/.git/info/exclude" \
-  || echo '.claude/critique.md' >> "$(git rev-parse --show-toplevel)/.git/info/exclude"
+excl="$(git rev-parse --git-path info/exclude)"
+grep -qxF '.claude/critiques/' "$excl" || echo '.claude/critiques/' >> "$excl"
 ```
 This doc feeds the handoff's "Open threads" — mention that to the user.
 

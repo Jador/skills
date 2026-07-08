@@ -10,8 +10,8 @@ Personal productivity skills for Claude Code.
 | **Plan** | `/jador:plan` | Break down an idea into a detailed execution plan with parallel task groups. Plans live in `~/plans/` |
 | **Execute** | `/jador:execute` | Run a plan using parallel sub-agents with worktree isolation and auto-retry |
 | **Babysit** | `/jador:babysit` | Monitor a PR for review comments and build failures, auto-fixing issues |
-| **Handoff** | `/jador:handoff` | Synthesize or read an agent handoff doc — a "what happened" digest (decisions, deviations, gotchas, open threads) at `.claude/agent-handoff.md`. Written by execute, read by babysit |
-| **Critique** | `/jador:critique` | Adversarial design review of a plan or changeset via the read-only `jador:adversary` agent — soundness, maintainability, alternatives at architecture altitude (not nits/bugs). Writes `.claude/critique.md` |
+| **Handoff** | `/jador:handoff` | Synthesize or read an agent handoff doc — a "what happened" digest (decisions, deviations, gotchas, open threads) at `.claude/handoffs/<branch>.md`. Written by execute, read by babysit |
+| **Critique** | `/jador:critique` | Adversarial design review of a plan or changeset via the read-only `jador:adversary` agent — soundness, maintainability, alternatives at architecture altitude (not nits/bugs). Writes `.claude/critiques/<branch>.md` |
 | **MQ** | `/jador:mq` | Monitor merge queue and auto-retry failed Buildkite jobs (checks every 2 min) |
 | **Backlog** | `/jador:backlog` | Surface idle work — notes without ideas, ideas without plans, plans without execution |
 | **Notepad** | `/jador:notepad` | Quick scratch pad for capturing, listing, and managing ideas |
