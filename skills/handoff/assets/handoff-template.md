@@ -28,7 +28,7 @@ last_updated: <ISO timestamp>
 
 ## Open threads
 
-<Deferred TODOs, known-incomplete work, and likely review-comment magnets. Includes unresolved items from .claude/critique.md if present.>
+<Deferred TODOs, known-incomplete work, and likely review-comment magnets. Includes unresolved items from .claude/critiques/<branch>.md if present.>
 
 ## Verification state
 
