@@ -325,7 +325,7 @@ Substitute `<PR_NUMBER>` with the detected PR number. Keep this line short — i
 
 ## Start Mode — Load Handoff Context
 
-Before reacting to events, check for a handoff left by `/jador:execute`. Invoke `/jador:handoff read` via the Skill tool. If it returns a summary, keep it in memory as **handoff context** — what shipped, the decisions and deliberate choices, the gotchas (so a worker does not "fix" something that was intentional), and the open threads (which often predict the very review comments you'll receive). If no handoff is present, proceed without it; this is read-only — never write the handoff from babysit.
+Before reacting to events, check for a handoff left by `/jador:execute`. Invoke `/jador:handoff read` via the Skill tool — since it runs in this session's working directory, the handoff skill resolves the branch-keyed doc for your current branch automatically, so you never construct a path yourself. If it returns a summary, keep it in memory as **handoff context** — what shipped, the decisions and deliberate choices, the gotchas (so a worker does not "fix" something that was intentional), and the open threads (which often predict the very review comments you'll receive). If no handoff is present, proceed without it; this is read-only — never write the handoff from babysit.
 
 When you dispatch workers (next section), prepend the handoff context to each worker's user message the same way you prepend freeform instructions — it gives the worker the author's intent so it doesn't undo a deliberate decision under reviewer pressure.
 
