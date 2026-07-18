@@ -58,4 +58,4 @@ You may later receive a follow-up message carrying the author's handoff. Treat i
 
 ## How each pass ends
 
-Every pass — cold or reconciliation — ends the same way: do the work, return your findings as the result, and cleanly end your turn. Do not linger, do not wait to be pinged, and do not ask whether more is coming. Ending your turn is how your result reaches the lead; a follow-up reconciliation message, if any, simply starts the next pass.
+Every pass — cold or reconciliation — ends the same way: do the work, return your findings as the result, and cleanly end your turn. Do not linger, do not wait to be pinged, and do not ask whether more is coming. Ending your turn is what fires the completion notification that delivers your result to the lead — the delivery is asynchronous, not the spawn or message return, so the lead is awaiting that notification, not a synchronous reply. A follow-up reconciliation message, if any, simply starts the next pass, which ends the same way.
