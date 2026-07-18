@@ -20,17 +20,19 @@ Jump directly to Step 1 with the slug from `$ARGUMENTS`.
 
 **Path B — `list`** (argument is exactly `list`):
 1. Glob for `*.md` files in `~/plans/`.
-2. For each plan file, read the frontmatter to extract the `status` and the `# Plan:` title.
-3. Display a table with columns: **Slug**, **Title**, **Status**.
-4. Stop here — do not continue to the planning steps below.
+2. For each plan file, read the frontmatter to extract the `status`, the `# Plan:` title, the plan's project (resolve it per the **Matching a doc to its project** rule in [assets/ranking-spec.md](assets/ranking-spec.md) — for plans, use the `project:` field; legacy plans without it resolve per that rule, else fall to "other"), and its recency date (`created:`).
+3. Order the plans using the ranking spec in [assets/ranking-spec.md](assets/ranking-spec.md) (current-repo docs first, then recency-desc, filename tiebreak).
+4. Display a table with columns: **★** (current-repo marker), **Slug**, **Title**, **Status** — rows in the ranked order. This is a full listing, not a pick UI, so pagination does not apply; show every plan.
+5. Stop here — do not continue to the planning steps below.
 
 **Path C — No arguments** (`$ARGUMENTS` is empty):
 1. Glob for all `*.md` files in `~/ideas/`.
 2. For each idea, extract the slug from the filename (strip `YYYY-MM-DD-` prefix and `.md` suffix).
 3. Check whether `~/plans/<slug>.md` exists — if it does, skip this idea (already planned).
-4. Present the remaining unplanned ideas to the user using AskUserQuestion and let them pick one.
-5. If no unplanned ideas remain, tell the user everything is planned and stop.
-6. Continue to Step 1 with the chosen slug.
+4. If no unplanned ideas remain, tell the user everything is planned and stop.
+5. Order the remaining unplanned ideas using the ranking spec in [assets/ranking-spec.md](assets/ranking-spec.md). For each idea, its project comes from `**Project:**` in the idea's Context section and its recency from the `YYYY-MM-DD-` filename prefix.
+6. Present the ranked ideas to the user with AskUserQuestion and let them pick one, following the spec's **Presentation** (mark current-repo ideas with ★) and **Overflow** (top 3 ideas + a "Show more…" option that re-prompts with the next page) rules.
+7. Continue to Step 1 with the chosen slug.
 
 ### 1. Load the Idea
 
@@ -79,8 +81,9 @@ Once the user is happy with the plan but before writing it, offer to stress-test
 
 Once approved (and after folding in any critique revisions):
 
-1. Write the file to `~/plans/<slug>.md` using the slug from the idea filename.
-2. Confirm the file path to the user.
+1. Determine the `project:` value for the frontmatter: run `basename "$(git rev-parse --show-toplevel 2>/dev/null)"`, falling back to the current working directory's basename when not in a git repo (see the **Current-repo identity** rule in [assets/ranking-spec.md](assets/ranking-spec.md)). Write this into the plan frontmatter's `project:` field.
+2. Write the file to `~/plans/<slug>.md` using the slug from the idea filename.
+3. Confirm the file path to the user.
 
 ## General Rules
 
@@ -93,3 +96,7 @@ Once approved (and after folding in any critique revisions):
 - Tests should be their own tasks, not bundled into implementation tasks, unless the test is trivial (e.g., a single assertion).
 - If the idea has open questions noted, flag them in the **Notes** section and make reasonable assumptions to keep the plan actionable.
 - The plan must be complete — executing all tasks in order should fully realize the idea.
+
+## Shared Ranking Spec — current-repo-first ordering
+
+The single source of truth for current-repo-first ordering lives in a standalone asset: **[assets/ranking-spec.md](assets/ranking-spec.md)**. Read it whenever you present a list of shared-directory docs (ideas, plans, notes). It defines current-repo identity, project matching (including the legacy-plan `idea:`-trace resolution and the unresolvable → "other" bucket), the recency rule, sort order, ★ presentation, and pick-UI overflow/pagination. Do not restate those rules here or in any consumer skill — reference the asset.

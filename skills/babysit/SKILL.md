@@ -230,7 +230,7 @@ Store the result (e.g., `owner/repo-name`) as **REPO**.
    ```
    sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "SELECT slug FROM pipelines WHERE repo = '<REPO>';"
    ```
-   If a row exists, use that slug as **PIPELINE**. Skip to Branch Divergence Check.
+   If a row exists, use that slug as **PIPELINE**. Skip to Create Data Directory and Bootstrap Schema.
 
 2. **Detect pipeline:** If no saved pipeline was found, run:
    ```
@@ -253,23 +253,6 @@ Store the result (e.g., `owner/repo-name`) as **REPO**.
    ```
    sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "INSERT INTO pipelines(repo, slug, ts) VALUES('<REPO>', '<PIPELINE>', datetime('now')) ON CONFLICT(repo) DO UPDATE SET slug=excluded.slug, ts=excluded.ts;"
    ```
-
-### Branch Divergence Check
-
-Run the following commands:
-
-```
-git fetch origin
-git merge-base --is-ancestor origin/main HEAD
-```
-
-If the `merge-base` command exits with a non-zero status, the branch has diverged from `origin/main`. Print a warning:
-
-```
-WARNING: Branch <BRANCH_NAME> has diverged from origin/main. There may be merge conflicts. Proceeding anyway.
-```
-
-Continue regardless — this is a warning only, not a blocker.
 
 ### Create Data Directory and Bootstrap Schema
 
@@ -325,9 +308,11 @@ Substitute `<PR_NUMBER>` with the detected PR number. Keep this line short — i
 
 ## Start Mode — Load Handoff Context
 
-Before reacting to events, check for a handoff left by `/jador:execute`. Invoke `/jador:handoff read` via the Skill tool — since it runs in this session's working directory, the handoff skill resolves the branch-keyed doc for your current branch automatically, so you never construct a path yourself. If it returns a summary, keep it in memory as **handoff context** — what shipped, the decisions and deliberate choices, the gotchas (so a worker does not "fix" something that was intentional), and the open threads (which often predict the very review comments you'll receive). If no handoff is present, proceed without it; this is read-only — never write the handoff from babysit.
+Before reacting to events, check for a handoff left by `/jador:execute`. Invoke `/jador:handoff read` via the Skill tool — since it runs in this session's working directory, the handoff skill resolves the branch-keyed doc for your current branch automatically, so you never construct a path yourself. If it returns a summary, keep it in memory as **handoff context** — what shipped, the decisions and deliberate choices, the gotchas (so a worker does not "fix" something that was intentional), and the open threads (which often predict the very review comments you'll receive). If no handoff is present, proceed without it; this load is read-only, and workers never write the handoff (see the write-access note below).
 
 When you dispatch workers (next section), prepend the handoff context to each worker's user message the same way you prepend freeform instructions — it gives the worker the author's intent so it doesn't undo a deliberate decision under reviewer pressure.
+
+**Handoff write access is workers-only read-only — the session writes the delta.** Workers never touch the handoff: they run in parallel against a shared worktree, so any handoff write from a worker would race the others. The *session*, by contrast, owns the single `git push` (see "Pushing fixes and posting AGREE replies" below) and does all its handoff writing in that one serialized post-push step — so its write can never race a worker. That is why the earlier blanket "babysit never writes the handoff" constraint no longer holds: it was really a *worker* constraint. Reading here is still read-only; the only write babysit performs is the session-level, post-push additive delta described below, and only when a handoff exists.
 
 ## Start Mode — Event Handling
 
@@ -374,7 +359,8 @@ After every worker in the batch has returned:
      --method POST -f body="<pending_reply.body>"
    ```
    Use the `repo`/`pr` from that worker's event and the `reply_to_id`/`body` from its `pending_reply`. The SHA in the body is now guaranteed on the remote. (DISAGREE/ESCALATE replies were already posted inline by the worker and need no action here.)
-3. **On push failure** (rejected, diverged), do **not** force-push and do **not** post the `pending_reply` replies — their SHAs would dangle. Surface the failure to the user verbatim: `babysit: push failed after fixes — resolve manually then re-run /babysit`. The commits stay local; nothing references an unpushed SHA.
+3. **On push success, keep the handoff honest.** If — and only if — you loaded **handoff context** at start (see "Load Handoff Context"), judge each commit that just landed against the decisions and open threads that context recorded. This is a **session-level** action, done here in the single-push step; do **not** delegate it to a worker and do **not** add any "wait for worker" step. For each landed commit, ask: does it *supersede a recorded decision* or *resolve a recorded open thread*? Routine fixes that touch no recorded decision produce **no entry** — say nothing rather than record noise. If one or more commits do supersede a decision or resolve an open thread, invoke `/jador:handoff update` via the **Skill tool in-session** (the same in-session invocation used by `/jador:handoff read` at start — never spawned as an Agent worker), passing the deltas you judged, each tying the change back to what it invalidated and citing the landed SHA, e.g. `Decision "use polling" → superseded by …a1b2c3d (review thread #4)` or `Open thread "retry logic" — resolved in …e4f5g6h`. Handoff `update` mode is additive: it appends to a single `## Changes Since Handoff (babysit)` section and never rewrites the original digest. If no handoff exists for the branch, `update` no-ops on its own — but when you loaded no handoff context, skip this step entirely rather than invoking it. Because the SHAs are already on the remote (you only reach this step on push success) and the write happens in this one serialized step, it never races the parallel workers.
+4. **On push failure** (rejected, diverged), do **not** force-push and do **not** post the `pending_reply` replies — their SHAs would dangle. **Do not** write the handoff delta either — nothing landed on the remote to record. Surface the failure to the user verbatim: `babysit: push failed after fixes — resolve manually then re-run /babysit`. The commits stay local; nothing references an unpushed SHA.
 
 ### Parallelism
 

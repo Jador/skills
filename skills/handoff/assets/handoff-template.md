@@ -41,3 +41,7 @@ last_updated: <ISO timestamp>
 ## Anticipated review feedback
 
 <Likely review comments, each with the intended fix or the defense for the current choice.>
+
+## Changes Since Handoff (babysit)
+
+<Additive delta log, appended by `handoff update` (not written at synthesize time). Each bullet ties a later change back to the decision it superseded or the open thread it resolved, anchored to a commit SHA — e.g. `Decision "use polling" → superseded by push-based fix in a1b2c3d (review thread #4)`. Never rewrites the sections above; omit or leave empty if nothing has superseded the original digest.>

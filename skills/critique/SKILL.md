@@ -1,7 +1,7 @@
 ---
 name: critique
-description: Adversarial design review of a plan or a changeset, run in a dedicated skeptical subagent (jador:adversary). Plan mode stress-tests soundness, assumptions, and alternatives before execution; changeset mode reviews the diff for design quality, maintainability, and refactor opportunities at architecture altitude — explicitly NOT style, nits, or minor bugs. Use before committing to a plan, or before opening a PR, to bring an implementation back to soundness.
-argument-hint: [plan <slug> | changeset]
+description: Adversarial design review of a plan, a changeset, or a bare idea, run in a dedicated skeptical subagent (jador:adversary). Plan mode stress-tests soundness, assumptions, and alternatives before execution; changeset mode reviews the diff for design quality, maintainability, and refactor opportunities at architecture altitude — explicitly NOT style, nits, or minor bugs; idea mode reviews an unwritten or draft idea for soundness, assumptions, and alternatives before it becomes a plan. Use before committing to a plan, before opening a PR, or while shaping an idea, to bring the work back to soundness.
+argument-hint: [plan <slug> | changeset | idea <slug>]
 disable-model-invocation: false
 ---
 
@@ -23,6 +23,7 @@ Parse `$ARGUMENTS`:
 
 - **`plan <slug>`** — review `~/plans/<slug>.md` (and its source idea) for soundness before execution. If no slug is given, ask which plan.
 - **`changeset`** — review the branch's changes in the current repo for design quality before a PR.
+- **`idea <slug>`** — review a bare idea for soundness, assumptions, and alternatives before it becomes a plan. The idea document is passed inline (e.g. by `jador:discuss` handing over a draft) or read from `~/ideas/<slug>.md` when invoked standalone. If invoked standalone with no slug and no inline draft, ask which idea.
 
 If the mode is ambiguous, ask.
 
@@ -37,13 +38,19 @@ If the mode is ambiguous, ask.
 2. Build the diff: `git diff <base>..HEAD` plus uncommitted changes, where `<base>` is the PR base branch if a PR exists, else the default branch.
 3. Intent = the originating idea/plan (find via branch/slug if present); artifact = the diff. Do **not** read the keyed handoff at `<root>/.claude/handoffs/<branch>.md` yet — that is the cross-check pass. Derive `<branch>` using the **Derive the branch path** substep of `skills/handoff/SKILL.md`'s "Locate the Handoff File" (the pure derivation only — do not run that step's `mkdir`/exclude side effects).
 
+**Idea mode:**
+1. If the idea document was passed inline (from `jador:discuss`), use it directly — do not read from disk. Otherwise read `~/ideas/<slug>.md`.
+2. Intent = the topic/goal the idea addresses; artifact = the idea document.
+
 ### 3. Run the Adversary — Cold Pass
 
-Spawn the `jador:adversary` subagent (Agent tool, `subagent_type: jador:adversary`). Give it a task message containing: the **mode**, the **stated intent**, and the **artifact** (the plan text, or the diff plus key file paths so it can read context itself). Do not include the builder's rationale. The adversary returns severity-ranked findings per its own format.
+Spawn the `jador:adversary` subagent (Agent tool, `subagent_type: jador:adversary`). Give it a task message containing: the **mode**, the **stated intent**, and the **artifact** (the plan text, the idea document, or the diff plus key file paths so it can read context itself). Do not include the builder's rationale.
+
+The adversary works **report-and-stop**: after its cold pass it returns severity-ranked findings and ends its turn, delivering the result asynchronously via a completion notification. **Await that completion notification.** Do not treat the spawn/SendMessage return as the result, and do not proactively ping the adversary asking for its findings — the completion arrives on its own. Once it lands, proceed with the returned findings.
 
 ### 4. Changeset Cross-Check Pass
 
-> Plan mode skips this step.
+> Plan and idea modes skip this step — there is no handoff or diff to reconcile against.
 
 Continue the *same* adversary subagent with SendMessage, now providing the keyed handoff at `<root>/.claude/handoffs/<branch>.md` if it exists (derive `<branch>` via the **Derive the branch path** substep of `skills/handoff/SKILL.md`, and apply its **Branch-aware legacy fallback** from "Read Mode — Load and Summarize"). Ask it to reconcile: for each cold finding, is it **defused** by the builder's stated rationale, or does it **stand**? Also surface any choice whose rationale doesn't hold up. If no handoff exists, say so and keep the cold findings.
 
@@ -57,6 +64,8 @@ grep -qxF '.claude/critiques/' "$excl" || echo '.claude/critiques/' >> "$excl"
 This doc feeds the handoff's "Open threads" — mention that to the user.
 
 **Plan mode:** return the findings conversationally so they fold into the plan-revision loop. Don't write a file unless asked.
+
+**Idea mode:** return the findings conversationally — never write a file. When invoked inline by `jador:discuss`, the findings fold into its draft-revision loop; when invoked standalone on a `~/ideas/<slug>.md`, they surface for the user to reshape the idea. This is advisory only.
 
 ### 6. Report
 

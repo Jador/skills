@@ -1,5 +1,6 @@
 ---
 idea: <path to source idea file>
+project: <current-repo name — basename of git toplevel, or cwd basename>
 created: <YYYY-MM-DD>
 status: pending
 ---

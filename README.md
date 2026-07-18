@@ -6,12 +6,12 @@ Personal productivity skills for Claude Code.
 
 | Skill | Command | Description |
 |-------|---------|-------------|
-| **Discuss** | `/jador:discuss` | Flesh out an idea through structured Q&A, producing a polished idea document in `~/ideas/` |
+| **Discuss** | `/jador:discuss` | Flesh out an idea through structured Q&A, producing a polished idea document in `~/ideas/` — with an optional `jador:critique` pass on the draft before writing |
 | **Plan** | `/jador:plan` | Break down an idea into a detailed execution plan with parallel task groups. Plans live in `~/plans/` |
 | **Execute** | `/jador:execute` | Run a plan using parallel sub-agents with worktree isolation and auto-retry |
 | **Babysit** | `/jador:babysit` | Monitor a PR for review comments and build failures, auto-fixing issues |
-| **Handoff** | `/jador:handoff` | Synthesize or read an agent handoff doc — a "what happened" digest (decisions, deviations, gotchas, open threads) at `.claude/handoffs/<branch>.md`. Written by execute, read by babysit |
-| **Critique** | `/jador:critique` | Adversarial design review of a plan or changeset via the read-only `jador:adversary` agent — soundness, maintainability, alternatives at architecture altitude (not nits/bugs). Writes `.claude/critiques/<branch>.md` |
+| **Handoff** | `/jador:handoff` | Synthesize, read, or update an agent handoff doc — a "what happened" digest (decisions, deviations, gotchas, open threads) at `.claude/handoffs/<branch>.md`. Written by execute, read by babysit, kept honest by babysit's post-push `update` (additive deltas) |
+| **Critique** | `/jador:critique` | Adversarial design review of a plan, changeset, or bare idea via the read-only `jador:adversary` agent — soundness, maintainability, alternatives at architecture altitude (not nits/bugs). Writes `.claude/critiques/<branch>.md` (idea mode is advisory, writes nothing) |
 | **MQ** | `/jador:mq` | Monitor merge queue and auto-retry failed Buildkite jobs (checks every 2 min) |
 | **Backlog** | `/jador:backlog` | Surface idle work — notes without ideas, ideas without plans, plans without execution |
 | **Notepad** | `/jador:notepad` | Quick scratch pad for capturing, listing, and managing ideas |

@@ -22,7 +22,11 @@ Read `$ARGUMENTS` and parse it:
 - Extract the plan slug (everything before `--step` if present).
 - Detect the `--step` flag (enables pause-between-waves mode).
 
-Find the matching plan file in `~/plans/<slug>.md`. If the slug is empty or no file matches, list available plan files in that directory and use AskUserQuestion to ask the user to pick one.
+Find the matching plan file in `~/plans/<slug>.md`. If the slug is empty or no file matches, list the available plan files in that directory and use AskUserQuestion to ask the user to pick one. Order that pick list using the shared ranking spec at [`../plan/assets/ranking-spec.md`](../plan/assets/ranking-spec.md): current-repo plans first, then recency-desc (`created:` frontmatter), filename ascending on ties.
+
+- **Project match.** For each plan, take its project from the `project:` frontmatter field. For **legacy plans that lack `project:`**, resolve it per the **Matching a doc to its project** rule in the ranking spec (unresolvable → "other").
+- **Presentation.** Mark each current-repo plan with a leading **★** glyph; other-repo plans get no marker. Each option still shows enough (slug/title + date) that its origin is clear.
+- **Overflow.** This is a pick UI, so the AskUserQuestion 4-option cap applies: when more than 4 plans are available, show the **top 3 ranked plans** plus a 4th **"Show more…"** option that re-prompts with the next page of 3 + "Show more…", continuing until the plans are exhausted.
 
 Read the full plan file. Also read the idea file referenced in the plan's frontmatter `idea:` field for additional context.
 
@@ -31,6 +35,15 @@ Read the full plan file. Also read the idea file referenced in the plan's frontm
 > **Skip this step entirely if the current working directory is not inside a git repository.** When not in a git repo, all sub-agents run directly in the current working directory with no worktree isolation.
 
 Use the `EnterWorktree` tool to create an isolated worktree for the entire plan execution. Pass the plan slug as the `name` parameter (e.g., `name: "remove-use-turn-manager"`). This creates the worktree at `.claude/worktrees/<slug>/` with its own branch and switches the session into it automatically.
+
+**Preflight: verify the worktree switch actually took before spawning any sub-agents.** Sub-agents inherit the session's cwd and commit wherever it points — if `EnterWorktree` did not move the session (step skipped, no-op'd, or refused because already in a worktree session), sub-agents would commit onto whatever branch you started on. The authoritative check is whether the branch *changed*, which needs no remote at all:
+
+1. **Before** calling `EnterWorktree`, record the starting branch: `before=$(git rev-parse --abbrev-ref HEAD)`. **After** it returns, record `after=$(git rev-parse --abbrev-ref HEAD)`.
+2. If `after` != `before`, the switch took — **proceed**. This is the primary signal: it needs no `origin`, no `origin/HEAD`, and no default-branch resolution, and it survives nested per-task worktrees (each lands on its own branch).
+3. If `after` == `before`, the switch may have failed — *or* you legitimately re-entered an already-active worktree (idempotent resume-in-place). Disambiguate: resolve the default branch (`git rev-parse --abbrev-ref origin/HEAD`, strip the leading `origin/`) and compare. If `after` equals the default branch, the switch did **not** take — **stop and re-establish the worktree** (re-run `EnterWorktree` / resolve the failure) before spawning any sub-agents. If `after` is some other (non-default) branch, you are already on a worktree branch (resume-in-place) — proceed.
+4. If the default branch cannot be resolved (no `origin` remote, unset `origin/HEAD`, or a fork workflow whose canonical remote isn't named `origin`), do **not** halt — **warn** that the switch could not be positively confirmed and proceed. The before/after comparison in step 2 is the real guard; an unresolvable default only weakens the step-3 resume-in-place disambiguation, and halting a core workflow over a benign, common git configuration would be worse than the rare risk it guards against. Compare branch names, not paths.
+
+This preflight is git-only, matching the "skip if not in a git repo" guard above — non-git runs have no worktree and are unaffected.
 
 All sub-agents and file operations for the rest of this execution run inside this worktree. The auto-detect logic for sub-agent isolation (step 5a) still applies — if parallel tasks within a wave have overlapping files, those sub-agents get their own nested worktrees via `isolation: "worktree"` on the Agent tool.
 

@@ -59,7 +59,9 @@ Omit **Files** if the user didn't mention any specific files. Omit **Related** i
 
 Trigger: `list`, `ls`, or `show all`.
 
-Read `~/notes.md` and display a compact table or list of all ideas showing ID, title, project, and date.
+Read `~/notes.md` and display a compact table of all ideas showing **★** (current-repo marker), ID, title, project, and date.
+
+Order the rows using the shared ranking spec at [`../plan/assets/ranking-spec.md`](../plan/assets/ranking-spec.md): current-repo notes first, then by recency descending, filename tiebreak. For notes, a note's project is its per-entry `**Project:**` field and its recency is its `**Added:**` date. Put a leading **★** in the marker column for each note whose `**Project:**` matches the current repo; leave it blank otherwise. This is a full listing, not a pick UI, so pagination does not apply — show every note.
 
 ### View
 

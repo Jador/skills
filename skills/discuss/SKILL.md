@@ -45,7 +45,28 @@ Engage in a back-and-forth conversation to flesh out the idea. Follow these rule
 
 When you believe the idea is sufficiently fleshed out, propose ending the discussion. Present a **draft** of the idea document as a fenced markdown block for the user to review.
 
-Tell the user they can request changes to the draft or approve it.
+Then use the **AskUserQuestion** tool to offer three choices:
+
+- **Approve** — accept the draft as-is and proceed to writing the file.
+- **Request changes** — keep discussing; fold the user's feedback into a revised draft and re-present.
+- **Critique first** — run the draft past `jador:critique` before writing (see below).
+
+#### 3a. Critique the Draft (optional loop)
+
+If the user picks **Critique first**, invoke the `jador:critique` skill (via the Skill tool) in **`idea`** mode, passing the draft **inline** so critique uses it directly rather than reading disk:
+
+- **topic / intent** = the idea's intent or goal (its title / summary).
+- **draft / artifact** = the full draft markdown, handed inline as text ("passed inline from jador:discuss").
+
+Critique spawns its adversary (which runs report-and-stop) and returns severity-ranked findings conversationally; critique already awaits that completion, so just invoke it and use the findings it returns.
+
+When findings come back:
+
+1. Fold the ones worth acting on into a **revised draft** (the user decides what to fold in — the critique is advisory, never a gate).
+2. Re-present the revised draft as a fenced markdown block.
+3. Re-offer the same three choices via AskUserQuestion: **Approve**, **Critique first** (run critique again on the revision), or **Request changes** (keep discussing).
+
+Loop on this until the user **approves**. Only then proceed to step 4. Do not write any file during this loop — it is entirely pre-write.
 
 ### 4. Write the Document
 
