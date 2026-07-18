@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Synthesize or read an agent handoff doc — a living "what actually happened" digest (decisions, deviations, gotchas, open threads) at `.claude/handoffs/<branch>.md`, uncommitted. Use to package finished work for the next agent, or to load prior context. Invoked manually, and by execute (synthesize at completion) and babysit (read for context).
+description: Synthesize, read, or update an agent handoff doc — a living "what actually happened" digest (decisions, deviations, gotchas, open threads) at `.claude/handoffs/<branch>.md`, uncommitted. Use to package finished work for the next agent, or to load prior context. Invoked manually, and by execute (synthesize at completion) and babysit (read for context, update post-push).
 argument-hint: [synthesize|read|update]
 disable-model-invocation: false
 ---
