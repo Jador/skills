@@ -33,7 +33,7 @@ Use Glob to find all files matching `~/plans/*.md`. For each plan file:
 2. If the `status` field is `pending`, the plan is **unexecuted**.
 3. Extract the title from the first H1 heading (`# ...`).
 4. Extract the `created` date from frontmatter — keep the raw `YYYY-MM-DD` for sorting and format a `Mon DD` for display.
-5. Extract the `project:` frontmatter field for ranking. For legacy plans lacking `project:`, resolve it per the Shared Ranking Spec (trace the `idea:` path to the source idea's `**Project:**`); treat an unresolvable project as "other".
+5. Extract the `project:` frontmatter field for ranking. For legacy plans lacking `project:`, resolve it per the **Matching a doc to its project** rule in the shared ranking spec at [`../plan/assets/ranking-spec.md`](../plan/assets/ranking-spec.md); treat an unresolvable project as "other".
 
 Collect all unexecuted plans into a list.
 
@@ -59,7 +59,7 @@ Nothing idle — all ideas are planned, all plans are executed, and no stray not
 
 Otherwise, print the results under an `## Idle Work` heading with the following subsections (only include a subsection if it has items).
 
-**Order within each subsection** using the **Shared Ranking Spec** (the canonical copy lives in the plan skill at `skills/plan/SKILL.md`, delimited by `SHARED-RANKING-SPEC:BEGIN`/`:END`): current-repo docs first, then recency descending, filename tiebreak. The current-repo identity is `basename "$(git rev-parse --show-toplevel 2>/dev/null)"` (falling back to the working directory's basename). Match each doc against it using the project captured during the scan (notes → per-entry `**Project:**`, ideas → Context `**Project:**`, plans → `project:` frontmatter). Recency is the note's `**Added:**` date, the idea's filename date, and the plan's `created:` date respectively.
+**Order within each subsection** using the shared ranking spec at [`../plan/assets/ranking-spec.md`](../plan/assets/ranking-spec.md): current-repo docs first, then recency descending, filename tiebreak. Match each doc against the current repo using the project captured during the scan (notes → per-entry `**Project:**`, ideas → Context `**Project:**`, plans → `project:` frontmatter). Recency is the note's `**Added:**` date, the idea's filename date, and the plan's `created:` date respectively.
 
 Prefix each current-repo doc's line with a leading **★ ** glyph; other-repo docs get no marker. These are full listings (not pick UIs), so show every item — pagination does not apply.
 

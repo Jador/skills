@@ -22,9 +22,9 @@ Read `$ARGUMENTS` and parse it:
 - Extract the plan slug (everything before `--step` if present).
 - Detect the `--step` flag (enables pause-between-waves mode).
 
-Find the matching plan file in `~/plans/<slug>.md`. If the slug is empty or no file matches, list the available plan files in that directory and use AskUserQuestion to ask the user to pick one. Order that pick list using the **Shared Ranking Spec — current-repo-first ordering** (the canonical copy lives in `plan/SKILL.md`, delimited by `SHARED-RANKING-SPEC:BEGIN`/`:END`): current-repo plans first, then recency-desc (`created:` frontmatter), filename ascending on ties.
+Find the matching plan file in `~/plans/<slug>.md`. If the slug is empty or no file matches, list the available plan files in that directory and use AskUserQuestion to ask the user to pick one. Order that pick list using the shared ranking spec at [`../plan/assets/ranking-spec.md`](../plan/assets/ranking-spec.md): current-repo plans first, then recency-desc (`created:` frontmatter), filename ascending on ties.
 
-- **Project match.** For each plan, take its project from the `project:` frontmatter field. For **legacy plans that lack `project:`**, resolve it by tracing the plan's `idea:` frontmatter path to the source idea file and reading that idea's `**Project:**`. If the project still cannot be determined (missing field, unresolvable `idea:` path, or idea with no project), the plan falls into the **"other"** bucket.
+- **Project match.** For each plan, take its project from the `project:` frontmatter field. For **legacy plans that lack `project:`**, resolve it per the **Matching a doc to its project** rule in the ranking spec (unresolvable → "other").
 - **Presentation.** Mark each current-repo plan with a leading **★** glyph; other-repo plans get no marker. Each option still shows enough (slug/title + date) that its origin is clear.
 - **Overflow.** This is a pick UI, so the AskUserQuestion 4-option cap applies: when more than 4 plans are available, show the **top 3 ranked plans** plus a 4th **"Show more…"** option that re-prompts with the next page of 3 + "Show more…", continuing until the plans are exhausted.
 
