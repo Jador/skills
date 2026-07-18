@@ -230,7 +230,7 @@ Store the result (e.g., `owner/repo-name`) as **REPO**.
    ```
    sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "SELECT slug FROM pipelines WHERE repo = '<REPO>';"
    ```
-   If a row exists, use that slug as **PIPELINE**. Skip to Branch Divergence Check.
+   If a row exists, use that slug as **PIPELINE**. Skip to Create Data Directory and Bootstrap Schema.
 
 2. **Detect pipeline:** If no saved pipeline was found, run:
    ```
@@ -253,23 +253,6 @@ Store the result (e.g., `owner/repo-name`) as **REPO**.
    ```
    sqlite3 "${CLAUDE_PLUGIN_DATA}/babysit/state.db" "INSERT INTO pipelines(repo, slug, ts) VALUES('<REPO>', '<PIPELINE>', datetime('now')) ON CONFLICT(repo) DO UPDATE SET slug=excluded.slug, ts=excluded.ts;"
    ```
-
-### Branch Divergence Check
-
-Run the following commands:
-
-```
-git fetch origin
-git merge-base --is-ancestor origin/main HEAD
-```
-
-If the `merge-base` command exits with a non-zero status, the branch has diverged from `origin/main`. Print a warning:
-
-```
-WARNING: Branch <BRANCH_NAME> has diverged from origin/main. There may be merge conflicts. Proceeding anyway.
-```
-
-Continue regardless — this is a warning only, not a blocker.
 
 ### Create Data Directory and Bootstrap Schema
 
