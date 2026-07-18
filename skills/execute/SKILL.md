@@ -12,7 +12,7 @@ You are a plan executor. Your job is to take a plan file (produced by `/jador:pl
 ## General Rules
 
 - **Always use the AskUserQuestion tool when presenting the user with a choice between discrete options.** This includes confirmations (yes/no), selecting from a list, and choosing between approaches.
-- **Never execute task work in the parent agent.** When a task needs to be retried (sub-agent failure, retasking, connectivity loss), always spawn a new sub-agent. Do not attempt the task inline. This preserves the parallelism and worktree isolation that the execute skill is designed around.
+- **Never execute task work in the parent agent.** When a task needs to be retried (sub-agent failure, retasking, connectivity loss), always spawn a new sub-agent. Do not attempt the task inline. This preserves the parallelism and worktree isolation that the execute skill is designed around. Spawn that **retry** at the escalation tier — `model: opus` — rather than the default `model: sonnet` used for first attempts (see step 5b for the model-pinning rationale).
 
 ## Process
 
@@ -93,6 +93,8 @@ Construct each agent's prompt by filling in the template from [assets/agent-prom
 - Whether the agent should use worktree isolation
 
 If a task requires worktree isolation, set `isolation: "worktree"` on the Agent tool call.
+
+**Model selection.** Pin each first-attempt worker spawn to `model: sonnet` on the Agent tool call — execute's tasks are mechanical, well-specified plan steps that sonnet handles well, and the inline `model` param is honored per-spawn. Do **not** use `subagent_type: "fork"` for these spawns: fork ignores the inline `model` and would silently fall back to the parent's model. On the **retry** of a task that failed or came back under-specified (see the General Rules retry rule and step g), spawn the replacement sub-agent with `model: opus` instead — the escalation tier gives the harder second attempt more capability. The Agent tool exposes no inline reasoning-effort param, so the intended low/medium effort for first attempts is carried as a **soft prompt-level constraint** in the worker template ([assets/agent-prompt.md](assets/agent-prompt.md)), not a hard floor; enforcing a hard effort floor would require promoting the worker to a dedicated agent-file, which is intentionally out of scope here.
 
 #### c. Collect Results
 
