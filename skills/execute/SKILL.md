@@ -38,7 +38,7 @@ Use the `EnterWorktree` tool to create an isolated worktree for the entire plan 
 
 **Preflight: verify the worktree switch actually took before spawning any sub-agents.** Sub-agents inherit the session's cwd and commit wherever it points — if `EnterWorktree` did not move the session (step skipped, no-op'd, or refused because already in a worktree session), sub-agents would commit onto the default branch. After calling `EnterWorktree`, confirm the session left the repo's default branch:
 
-1. Resolve the default branch dynamically — do not assume `main`: run `git rev-parse --abbrev-ref origin/HEAD` and strip the leading `origin/` (e.g. `origin/main` → `main`).
+1. Resolve the default branch dynamically — do not assume `main`: run `git rev-parse --abbrev-ref origin/HEAD` and strip the leading `origin/` (e.g. `origin/main` → `main`). `origin/HEAD` is not always populated (fresh clone, or no `origin` remote); if the result is empty, run `git remote set-head origin -a` and retry. If it still cannot be resolved, **halt** (do not proceed) — an unresolved default means the guard cannot prove the switch took, and halting is the safe failure. Report that the default branch could not be determined.
 2. Get the current branch: `git rev-parse --abbrev-ref HEAD`.
 3. If the current branch still equals the default branch, the switch did not take — **stop and re-establish the worktree** (re-run `EnterWorktree` / resolve the failure) before spawning any sub-agents. Compare branch names, not paths — this survives nested per-task worktrees, whose branches are also non-default.
 
