@@ -1,7 +1,7 @@
 ---
 name: handoff
 description: Synthesize or read an agent handoff doc — a living "what actually happened" digest (decisions, deviations, gotchas, open threads) at `.claude/handoffs/<branch>.md`, uncommitted. Use to package finished work for the next agent, or to load prior context. Invoked manually, and by execute (synthesize at completion) and babysit (read for context).
-argument-hint: [synthesize|read]
+argument-hint: [synthesize|read|update]
 disable-model-invocation: false
 ---
 
@@ -19,12 +19,13 @@ You are a handoff synthesizer. Your job is to package what actually happened dur
 
 ### 1. Determine Mode
 
-Parse `$ARGUMENTS` for the mode. Two modes exist:
+Parse `$ARGUMENTS` for the mode. Three modes exist:
 
-- **`synthesize`** (default when no mode is given) — build or rebuild the handoff from the current state of the work.
+- **`synthesize`** (default when no mode is given) — build or rebuild the handoff from the current state of the work, overwriting it.
 - **`read`** — load the existing handoff and summarize it for the caller.
+- **`update`** — additively append deltas to an existing handoff without rewriting its body. Used by babysit to keep the on-disk digest honest as workers land fixes that supersede recorded decisions. Never overwrites; no-op if no handoff exists for the branch.
 
-If `$ARGUMENTS` contains neither word, default to `synthesize`.
+If `$ARGUMENTS` contains none of these words, default to `synthesize`.
 
 ### 2. Locate the Handoff File
 
@@ -45,7 +46,7 @@ The handoff is keyed by branch so every line of work — per worktree, per branc
 
 ### 3. Synthesize Mode — Gather Inputs
 
-> Skip to Step 5 if the mode is `read`.
+> Skip to Step 5 if the mode is `read`; skip to Step 6 if the mode is `update`.
 
 Collect the raw material for the digest from what is actually available — do not speculate:
 
@@ -59,7 +60,7 @@ Collect the raw material for the digest from what is actually available — do n
 
 ### 4. Synthesize Mode — Write the Handoff
 
-Render `assets/handoff-template.md`, filling every section from the gathered inputs and obeying the digest rules in **General Rules**. Write the result to the keyed handoff path `<root>/.claude/handoffs/<branch>.md` (Step 2) — never to any legacy path — overwriting any existing file (synthesize always produces a fresh, coherent digest from current state — it does not append). Set the frontmatter `last_updated` to the current timestamp. Then go to Step 6.
+Render `assets/handoff-template.md`, filling every section from the gathered inputs and obeying the digest rules in **General Rules**. Write the result to the keyed handoff path `<root>/.claude/handoffs/<branch>.md` (Step 2) — never to any legacy path — overwriting any existing file (synthesize always produces a fresh, coherent digest from current state — it does not append). Set the frontmatter `last_updated` to the current timestamp. Then go to Step 7.
 
 If re-invoked later in the same session (e.g. the user asked for changes after the first synthesis), re-run Steps 3–4 to refresh the digest.
 
@@ -70,7 +71,21 @@ If re-invoked later in the same session (e.g. the user asked for changes after t
 3. If neither the keyed file nor a matching legacy file is found, report "No handoff doc present" and stop — the caller should proceed without it.
 4. Otherwise, read the located file and return a tight summary for the caller: what shipped, the load-bearing decisions and deviations, the gotchas (so the caller does not "fix" deliberate choices), and the open threads. This summary is the context a babysitter uses to brief its workers. Do not modify the file in read mode.
 
-### 6. Report
+### 6. Update Mode — Append Deltas
+
+Update mode keeps an existing handoff honest as later work (typically babysit's review/build fixes) supersedes the decisions or resolves the open threads that `synthesize` recorded. It is strictly additive: it maintains a single `## Changes Since Handoff (babysit)` section and appends bullets to it, never touching the original Decisions / Gotchas / Open Threads body.
+
+1. Read the keyed handoff path `<root>/.claude/handoffs/<branch>.md` (Step 2).
+2. **No-op if absent.** If no handoff file exists for the branch, do nothing and report "No handoff to update" — there is nothing to keep honest (e.g. babysit ran on a PR with no execute handoff). Do **not** create a new file, and do **not** fall back to the legacy path.
+3. Otherwise, gather the deltas to record from the caller's context — each a change that supersedes a recorded decision or resolves an open thread. The caller (babysit) supplies these, judged against the decisions/open-threads it loaded at start. Routine fixes that touch no recorded decision produce no entry.
+4. Ensure the hosting section exists. If the file has no `## Changes Since Handoff (babysit)` section, append the section header (see `assets/handoff-template.md`) to the **end** of the file. Never reorder or rewrite the sections above it.
+5. Append one bullet per delta under that section, each tying the change back to what it invalidated and citing the anchoring commit SHA. Follow this shape:
+   - `Decision "use polling" → superseded by push-based fix in a1b2c3d (review thread #4)`
+   - `Open thread "retry logic" — resolved in e4f5g6h`
+6. Set the frontmatter `last_updated` to the current timestamp. Leave every other section byte-for-byte unchanged. Then go to Step 7.
+
+### 7. Report
 
 - **Synthesize**: confirm the path written and print the section headers with a one-line preview of each, so the user sees what the next agent will receive.
 - **Read**: present the summary from Step 5.
+- **Update**: confirm the deltas appended (or that it was a no-op because no handoff exists for the branch).
