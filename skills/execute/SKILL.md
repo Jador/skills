@@ -32,6 +32,14 @@ Read the full plan file. Also read the idea file referenced in the plan's frontm
 
 Use the `EnterWorktree` tool to create an isolated worktree for the entire plan execution. Pass the plan slug as the `name` parameter (e.g., `name: "remove-use-turn-manager"`). This creates the worktree at `.claude/worktrees/<slug>/` with its own branch and switches the session into it automatically.
 
+**Preflight: verify the worktree switch actually took before spawning any sub-agents.** Sub-agents inherit the session's cwd and commit wherever it points — if `EnterWorktree` did not move the session (step skipped, no-op'd, or refused because already in a worktree session), sub-agents would commit onto the default branch. After calling `EnterWorktree`, confirm the session left the repo's default branch:
+
+1. Resolve the default branch dynamically — do not assume `main`: run `git rev-parse --abbrev-ref origin/HEAD` and strip the leading `origin/` (e.g. `origin/main` → `main`).
+2. Get the current branch: `git rev-parse --abbrev-ref HEAD`.
+3. If the current branch still equals the default branch, the switch did not take — **stop and re-establish the worktree** (re-run `EnterWorktree` / resolve the failure) before spawning any sub-agents. Compare branch names, not paths — this survives nested per-task worktrees, whose branches are also non-default.
+
+This preflight is git-only, matching the "skip if not in a git repo" guard above — non-git runs have no worktree and are unaffected.
+
 All sub-agents and file operations for the rest of this execution run inside this worktree. The auto-detect logic for sub-agent isolation (step 5a) still applies — if parallel tasks within a wave have overlapping files, those sub-agents get their own nested worktrees via `isolation: "worktree"` on the Agent tool.
 
 ### 3. Parse Tasks
