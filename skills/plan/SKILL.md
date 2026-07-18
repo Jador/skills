@@ -116,12 +116,12 @@ A doc whose project cannot be determined is treated as "other" (not current-repo
 - **Plans** — the `created:` frontmatter field.
 - **Notes** — the note's `**Added:**` field.
 
-Ties (equal dates) are broken by filename, ascending.
+Ties (equal dates) are broken by filename, ascending. Notes have no filename (they are entries in the shared `~/notes.md`); break equal-date note ties by note **ID, ascending**.
 
 **Sort order (apply in full).**
 1. Current-repo docs first, then "other" docs.
 2. Within each bucket, most-recent embedded date first (descending).
-3. Within equal dates, filename ascending.
+3. Within equal dates, filename ascending (notes: ID ascending).
 
 **Presentation.** A single flat list in the sorted order above — no section headers. Mark each current-repo doc with a leading **★** glyph so its origin is legible; other-repo docs get no marker. Each row still shows enough (title + date) that its origin is clear.
 
