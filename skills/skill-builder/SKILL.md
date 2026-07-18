@@ -68,6 +68,7 @@ Work through the following topics conversationally. Ask questions only when you 
 - **Invocation mode**: Whether `disable-model-invocation` should be `true` (default for personal skills — skill runs only when explicitly invoked) or `false` (model can decide to invoke it based on context).
 - **Assets and data needs**: Whether the skill needs an `assets/` directory (for templates, reference files, static content) or a `data/` directory (for runtime-generated output, state, logs). Most skills need neither.
 - **Tools used**: Which Claude Code tools the skill will rely on (e.g., WebFetch, Agent, Bash, Read, Write, Glob, Grep, AskUserQuestion).
+- **Subagent models**: If the skill spawns subagents (via the Agent tool or agent-definition files), decide which model each spawned role should be pinned to. See **Model-Pin Convention** below and apply it intentionally per role.
 - **Process steps**: The numbered steps the skill will follow. Sketch these out and discuss with the user.
 
 ### 5. Apply Conventions
@@ -146,6 +147,32 @@ The skill produces a directory with the following structure:
 The `assets/` and `data/` directories are only created when the skill being built requires them.
 
 For **repo-scoped skills**, additional files outside the skill directory may be modified — READMEs, manifests, tables of contents, or other documentation files that reference existing skills in the target repository.
+
+## Model-Pin Convention
+
+When a skill spawns subagents, pin each spawned role to a model deliberately rather than letting it inherit the session model. This repo uses a **static, per-role** policy so a skill's subagents behave consistently regardless of which model the user happens to have selected for the session. Apply this convention whenever you scaffold a skill that spawns work.
+
+### Two pin mechanisms
+
+- **Agent-definition frontmatter** (`model:` in an `agents/*.md` file): use for **subagent-typed** spawns — roles that have a dedicated agent definition and are invoked by `subagent_type` (e.g. `jador:adversary` = `fable`, `jador:planner` = `opus`). This is also the **only** place a durable reasoning-**effort** pin can live: the Agent tool has no inline `effort` parameter, so effort cannot be set per-call. If a role needs a fixed effort level, it must be a subagent-typed agent with the effort pinned in its frontmatter.
+- **Agent-tool `model` parameter** (inline on the spawning call): use for **inline / ad-hoc** spawns that don't warrant a dedicated agent file (e.g. execute's implementation workers = `sonnet`, mq's queue-check = `haiku`, discuss's research spawns = `haiku`).
+
+Use **Claude Code short aliases** — `fable` / `opus` / `sonnet` / `haiku` — not full model IDs. Aliases survive model releases; pinned IDs silently rot.
+
+**Guardrail:** never use `subagent_type: "fork"` for a pinned spawn. A fork ignores the inline `model` parameter (it always inherits the parent's model), so a `model` pin on a fork is silently dropped. Pin via a non-fork agent type or an agent-definition file instead.
+
+### Role → tier rationale
+
+Choose the tier from the role's job, so future skills pin intentionally rather than by habit:
+
+| Role kind | Tier | Why |
+| --- | --- | --- |
+| Heavy reasoning — planning, decomposition, architecture | `opus` | Highest model-quality leverage; low call volume. Its output is amplified downstream by cheaper workers, so quality here compounds. |
+| Adversarial review — skeptical critique, flaw-finding | `fable` | Apex skeptical-reasoning role, run at **high** effort. Low call volume makes the cost affordable; keep `opus` as a refusal fallback. |
+| Implementation / orchestration workers | `sonnet` | Capable agentic execution at lower cost; the plan's reasoning already exists, so workers follow it. Escalate to `opus` on a failed or under-specified retry. |
+| Cheap mechanical work — status polling, extraction, low-stakes research | `haiku` | Read-only, low-stakes, human in the loop. Reserve the expensive tiers for reasoning that needs them. |
+
+Note that static pins only control **subagent** models. A skill's own in-session reasoning always runs on the session model and cannot be pinned by the skill; the user manages that via `/model`. Skills whose heavy work must be a specific tier should delegate that work to a pinned subagent rather than run it inline.
 
 ## After Scaffolding
 
