@@ -43,14 +43,24 @@ Read the full idea document.
 ### 2. Gather Context
 
 Review the idea document thoroughly. If the idea references a project or specific files:
-- Use the Agent tool to explore the relevant parts of the codebase to understand existing patterns, conventions, and constraints.
+- Use the Agent tool to explore the relevant parts of the codebase to understand existing patterns, conventions, and constraints. **Pin these codebase-exploration spawns to `model: sonnet`** (pass `model: sonnet` in the Agent-tool call) — exploration is capable read-only work that does not need the planner's model.
 - Note what already exists that can be reused vs. what needs to be built.
+
+Carry the gathered context forward — you will hand it to the planner subagent in Step 3.
 
 If you need more information to create a good plan, ask the user clarifying questions — **one question at a time**. Only ask questions when truly necessary; prefer making reasonable assumptions and noting them in the plan.
 
 ### 3. Generate the Plan
 
-Break the idea down into tasks following these rules:
+Delegate the decomposition reasoning to the pinned `jador:planner` subagent (Agent tool, `subagent_type: jador:planner`) — mirroring how `jador:critique` delegates to `jador:adversary`. This keeps the highest-leverage reasoning in the pipeline on a strong, pinned model regardless of the session model. Give it a task message containing:
+
+- The **idea document** (the full text you loaded in Step 1).
+- The **gathered codebase context** from Step 2 — existing patterns, conventions, constraints, and what can be reused vs. built new.
+- The **absolute path to the plan template** ([assets/plan-template.md](assets/plan-template.md)) so it formats its output correctly.
+
+The planner works **report-and-stop**: it does the decomposition and returns the plan draft as its result, delivered asynchronously via a completion notification. **Await that completion notification** — do not treat the spawn return as the result, and do not proactively ping the planner. Once the draft lands, carry it into Step 4 for review.
+
+The planner decomposes against these rules (it enforces them; this is what it produces):
 
 - **Small and self-contained**: Each task should be completable in a single focused effort. A task should touch a small number of files and have a clear "done" state.
 - **Specific**: Tasks should name exact files to create/modify, functions to implement, tests to write. Avoid vague tasks like "set up the backend."
@@ -59,7 +69,7 @@ Break the idea down into tasks following these rules:
 - **Parallelism noted**: Tasks that can run simultaneously share a `parallel_group` label. Independent tasks with no blockers that could run at the same time should be grouped.
 - **Verified**: Every task that modifies code must include a verification step — a command to run, a test to pass, or a condition to check. Include steps to run tests, lint, and typecheck (for typed languages). There is no "where applicable" — if the task touches code, it gets a verification step.
 
-Use the template at [assets/plan-template.md](assets/plan-template.md) for the output format.
+The planner formats its draft against the template at [assets/plan-template.md](assets/plan-template.md).
 
 ### 4. Present for Review
 
@@ -91,11 +101,7 @@ Once approved (and after folding in any critique revisions):
 
 ## Guidelines
 
-- Prefer more tasks that are smaller over fewer tasks that are larger. A task that touches 1-3 files is ideal.
-- Group related setup tasks (e.g., "create migration" and "create model") only if they are truly inseparable. Otherwise, keep them separate for clearer progress tracking.
-- Tests should be their own tasks, not bundled into implementation tasks, unless the test is trivial (e.g., a single assertion).
-- If the idea has open questions noted, flag them in the **Notes** section and make reasonable assumptions to keep the plan actionable.
-- The plan must be complete — executing all tasks in order should fully realize the idea.
+The decomposition judgment — task granularity (prefer smaller, 1-3 files), when to group vs. split, tests as their own tasks, flagging open questions with stated assumptions, and completeness — lives in the `jador:planner` subagent that produces the plan (see Step 3). Do not re-derive it here; the planner owns it. When you fold in review edits (Step 4) or critique revisions (Step 5), keep the plan consistent with those same principles.
 
 ## Shared Ranking Spec — current-repo-first ordering
 
