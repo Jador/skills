@@ -44,7 +44,7 @@ If the mode is ambiguous, ask.
 
 ### 3. Run the Adversary — Cold Pass
 
-Spawn the `jador:adversary` subagent (Agent tool, `subagent_type: jador:adversary`). Give it a task message containing: the **mode**, the **stated intent**, and the **artifact** (the plan text, the idea document, or the diff plus key file paths so it can read context itself). Do not include the builder's rationale.
+Spawn the `jador:adversary` subagent (Agent tool, `subagent_type: jador:adversary`). Give it a task message containing: the **mode**, the **stated intent**, and the **artifact** (the plan text, the idea document, or the diff plus key file paths so it can read context itself). Do not include the builder's rationale. (If the adversary refuses on cyber-classifier grounds — `fable` can restrict security/threat-model reviews — re-spawn it with `model: opus`.)
 
 The adversary works **report-and-stop**: after its cold pass it returns severity-ranked findings and ends its turn, delivering the result asynchronously via a completion notification. **Await that completion notification.** Do not treat the spawn/SendMessage return as the result, and do not proactively ping the adversary asking for its findings — the completion arrives on its own. Once it lands, proceed with the returned findings.
 

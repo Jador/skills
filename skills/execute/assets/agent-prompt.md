@@ -39,6 +39,8 @@ Read the description carefully. Read ALL files listed in the Files section befor
 
 Make the changes described. Follow existing code conventions in the project. Do not make changes beyond what the task describes — stay focused and scoped.
 
+Keep your reasoning proportionate to the task. These are pre-planned, well-specified steps — implement them directly and do not over-deliberate mechanical work. Reserve extended deliberation for genuine ambiguity or a verification failure you need to diagnose; otherwise favor acting over re-planning.
+
 ### 3. Run Verification
 
 Run the verification step exactly as described. This is mandatory — your task is NOT complete until verification passes.
