@@ -155,7 +155,7 @@ When a skill spawns subagents, pin each spawned role to a model deliberately rat
 ### Two pin mechanisms
 
 - **Agent-definition frontmatter** (`model:` in an `agents/*.md` file): use for **subagent-typed** spawns — roles that have a dedicated agent definition and are invoked by `subagent_type` (e.g. `jador:adversary` = `fable`, `jador:planner` = `opus`). This is also the **only** place a durable reasoning-**effort** pin can live: the Agent tool has no inline `effort` parameter, so effort cannot be set per-call. If a role needs a fixed effort level, it must be a subagent-typed agent with the effort pinned in its frontmatter.
-- **Agent-tool `model` parameter** (inline on the spawning call): use for **inline / ad-hoc** spawns that don't warrant a dedicated agent file (e.g. execute's implementation workers = `sonnet`, mq's queue-check = `haiku`, discuss's research spawns = `haiku`).
+- **Agent-tool `model` parameter** (inline on the spawning call): use for **inline / ad-hoc** spawns that don't warrant a dedicated agent file (e.g. execute's implementation workers = `sonnet`, mq's queue-check = `haiku`, discuss's research spawns = `sonnet`).
 
 Use **Claude Code short aliases** — `fable` / `opus` / `sonnet` / `haiku` — not full model IDs. Aliases survive model releases; pinned IDs silently rot.
 
@@ -170,7 +170,9 @@ Choose the tier from the role's job, so future skills pin intentionally rather t
 | Heavy reasoning — planning, decomposition, architecture | `opus` | Highest model-quality leverage; low call volume. Its output is amplified downstream by cheaper workers, so quality here compounds. |
 | Adversarial review — skeptical critique, flaw-finding | `fable` | Apex skeptical-reasoning role, run at **high** effort. Low call volume makes the cost affordable; keep `opus` as a refusal fallback. |
 | Implementation / orchestration workers | `sonnet` | Capable agentic execution at lower cost; the plan's reasoning already exists, so workers follow it. Escalate to `opus` on a failed or under-specified retry. |
-| Cheap mechanical work — status polling, extraction, low-stakes research | `haiku` | Read-only, low-stakes, human in the loop. Reserve the expensive tiers for reasoning that needs them. |
+| Cheap mechanical work — status polling, extraction, low-stakes lookups | `haiku` | Read-only, low-stakes, human in the loop. Reserve the expensive tiers for reasoning that needs them. |
+
+Note: "research" is not a single tier. Mechanical extraction/lookup → `haiku`; but front-of-pipeline **synthesis / idea-shaping** research (e.g. `discuss`'s research spawns) is judgment work whose output propagates downstream, so it warrants `sonnet`. Pick the tier from what the research actually does, not the word.
 
 Note that static pins only control **subagent** models. A skill's own in-session reasoning always runs on the session model and cannot be pinned by the skill; the user manages that via `/model`. Skills whose heavy work must be a specific tier should delegate that work to a pinned subagent rather than run it inline.
 

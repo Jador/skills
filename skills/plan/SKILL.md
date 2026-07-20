@@ -58,7 +58,7 @@ Delegate the decomposition reasoning to the pinned `jador:planner` subagent (Age
 - The **gathered codebase context** from Step 2 — existing patterns, conventions, constraints, and what can be reused vs. built new.
 - The **absolute path to the plan template** ([assets/plan-template.md](assets/plan-template.md)) so it formats its output correctly.
 
-The planner works **report-and-stop**: each pass it does the work and returns its result, delivered asynchronously via a completion notification. **Await that completion notification** — do not treat the spawn return as the result, and do not proactively ping the planner. **Keep the planner subagent alive after the first draft** — Steps 4 and 5 re-engage the *same* subagent via SendMessage so that every decomposition revision (not just the initial draft) stays on its pinned model. This is the true mirror of how `jador:critique` re-engages `jador:adversary` across passes; a fire-and-forget planner would leak all later restructuring back onto the session model. Once the first draft lands, carry it into Step 4 for review.
+The planner works **report-and-stop**: it does the decomposition, returns the plan draft as its result (delivered asynchronously via a completion notification), and ends its turn. **Await that completion notification** — do not treat the spawn return as the result, and do not proactively ping the planner. Once the draft lands, carry it into Step 4 for review. Every later revision (Steps 4 and 5) is a **fresh** `jador:planner` spawn given the current draft plus the changes — so all decomposition, not just the first draft, runs on the pinned model, with **no dependency on keeping a subagent alive** across your review loop or a nested critique run. (Re-spawning per pass rather than parking one live subagent is deliberate: the decomposition rules are single-sourced in the planner, so a fresh spawn handed the current draft gets the identical result without any liveness/resume fragility.)
 
 The **decomposition rules** the planner enforces (small/self-contained, specific, ordered, dependencies explicit, parallelism noted, verified) live in [`agents/planner.md`](../../agents/planner.md) — the planner owns them. Do **not** restate them here; that is the single source of truth for how a plan is decomposed.
 
@@ -72,12 +72,12 @@ Present the plan (the planner's latest draft) as a fenced markdown block. Tell t
 - They can request changes to specific tasks (add, remove, split, merge, reorder, re-detail).
 - They can ask you to add more detail to any task.
 
-When the user requests changes, **do not edit the draft yourself** — restructuring the task graph in the parent would move decomposition off the planner's pinned model. Instead, send the requested changes to the still-alive `jador:planner` subagent via SendMessage: treat it as a fresh revision pass (the planner applies the changes against its decomposition rules, returns the revised draft, and stops). Await the completion notification, then re-present. Loop until the user approves. (If the planner subagent is no longer reachable — e.g. a resumed session — re-spawn a fresh `jador:planner` with the current draft plus the requested changes rather than editing inline.)
+When the user requests changes, **do not edit the draft yourself** — restructuring the task graph in the parent would move decomposition off the planner's pinned model. Instead, **spawn a fresh `jador:planner`** (Agent tool, `subagent_type: jador:planner`) with the current draft plus the requested changes; it applies them against its decomposition rules, returns the revised draft, and stops. Await the completion notification, then re-present. Loop until the user approves. (A fresh spawn each pass — rather than reusing a parked subagent — is deliberate: it needs no liveness across your review turns and survives a resumed session, while still keeping every revision on the pinned model.)
 
 ### 5. Offer a Design Critique
 
 Once the user is happy with the plan but before writing it, offer to stress-test it. Use AskUserQuestion:
-- **Run critique**: invoke `/jador:critique plan <slug>` via the Skill tool. A dedicated adversary reviews the plan for soundness — it names the load-bearing assumptions, proposes at least one concrete alternative, and states what would make this the wrong approach. Findings come back conversationally; for any the user accepts, send them to the still-alive `jador:planner` subagent via SendMessage to fold into a revised draft (keeping the critique-driven restructuring on the pinned model), await the revised draft, and re-present before continuing.
+- **Run critique**: invoke `/jador:critique plan <slug>` via the Skill tool. A dedicated adversary reviews the plan for soundness — it names the load-bearing assumptions, proposes at least one concrete alternative, and states what would make this the wrong approach. Findings come back conversationally; for any the user accepts, **spawn a fresh `jador:planner`** with the current draft plus the accepted findings to fold them in (keeping the critique-driven restructuring on the pinned model), await the revised draft, and re-present before continuing.
 - **Skip**: write the plan as-is.
 
 ### 6. Write the Plan
@@ -94,7 +94,7 @@ Once approved (and after folding in any critique revisions):
 
 ## Guidelines
 
-The decomposition judgment — task granularity (prefer smaller, 1-3 files), when to group vs. split, tests as their own tasks, flagging open questions with stated assumptions, and completeness — lives in the `jador:planner` subagent that produces the plan (see Step 3). Do not re-derive it here; the planner owns it. When you fold in review edits (Step 4) or critique revisions (Step 5), keep the plan consistent with those same principles.
+The decomposition judgment — task granularity (prefer smaller, 1-3 files), when to group vs. split, tests as their own tasks, flagging open questions with stated assumptions, and completeness — lives in the `jador:planner` subagent that produces the plan (see Step 3). Do not re-derive it here; the planner owns it. When the user requests review edits (Step 4) or accepts critique revisions (Step 5), you **forward** them to a fresh `jador:planner` spawn (per those steps) — you do not apply decomposition judgment yourself; the planner does, keeping it on the pinned model.
 
 ## Shared Ranking Spec — current-repo-first ordering
 
