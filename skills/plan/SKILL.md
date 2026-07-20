@@ -58,7 +58,7 @@ Delegate the decomposition reasoning to the pinned `jador:planner` subagent (Age
 - The **gathered codebase context** from Step 2 — existing patterns, conventions, constraints, and what can be reused vs. built new.
 - The **absolute path to the plan template** ([assets/plan-template.md](assets/plan-template.md)) so it formats its output correctly.
 
-The planner works **report-and-stop**: it does the decomposition and returns the plan draft as its result, delivered asynchronously via a completion notification. **Await that completion notification** — do not treat the spawn return as the result, and do not proactively ping the planner. Once the draft lands, carry it into Step 4 for review.
+The planner works **report-and-stop**: each pass it does the work and returns its result, delivered asynchronously via a completion notification. **Await that completion notification** — do not treat the spawn return as the result, and do not proactively ping the planner. **Keep the planner subagent alive after the first draft** — Steps 4 and 5 re-engage the *same* subagent via SendMessage so that every decomposition revision (not just the initial draft) stays on its pinned model. This is the true mirror of how `jador:critique` re-engages `jador:adversary` across passes; a fire-and-forget planner would leak all later restructuring back onto the session model. Once the first draft lands, carry it into Step 4 for review.
 
 The **decomposition rules** the planner enforces (small/self-contained, specific, ordered, dependencies explicit, parallelism noted, verified) live in [`agents/planner.md`](../../agents/planner.md) — the planner owns them. Do **not** restate them here; that is the single source of truth for how a plan is decomposed.
 
@@ -66,18 +66,18 @@ The planner formats its draft against the template at [assets/plan-template.md](
 
 ### 4. Present for Review
 
-Present the plan as a fenced markdown block. Tell the user:
+Present the plan (the planner's latest draft) as a fenced markdown block. Tell the user:
 
 - They can approve the plan as-is.
 - They can request changes to specific tasks (add, remove, split, merge, reorder, re-detail).
 - They can ask you to add more detail to any task.
 
-Iterate conversationally until the user approves.
+When the user requests changes, **do not edit the draft yourself** — restructuring the task graph in the parent would move decomposition off the planner's pinned model. Instead, send the requested changes to the still-alive `jador:planner` subagent via SendMessage: treat it as a fresh revision pass (the planner applies the changes against its decomposition rules, returns the revised draft, and stops). Await the completion notification, then re-present. Loop until the user approves. (If the planner subagent is no longer reachable — e.g. a resumed session — re-spawn a fresh `jador:planner` with the current draft plus the requested changes rather than editing inline.)
 
 ### 5. Offer a Design Critique
 
 Once the user is happy with the plan but before writing it, offer to stress-test it. Use AskUserQuestion:
-- **Run critique**: invoke `/jador:critique plan <slug>` via the Skill tool. A dedicated adversary reviews the plan for soundness — it names the load-bearing assumptions, proposes at least one concrete alternative, and states what would make this the wrong approach. Findings come back conversationally; fold any the user accepts into the plan, then continue.
+- **Run critique**: invoke `/jador:critique plan <slug>` via the Skill tool. A dedicated adversary reviews the plan for soundness — it names the load-bearing assumptions, proposes at least one concrete alternative, and states what would make this the wrong approach. Findings come back conversationally; for any the user accepts, send them to the still-alive `jador:planner` subagent via SendMessage to fold into a revised draft (keeping the critique-driven restructuring on the pinned model), await the revised draft, and re-present before continuing.
 - **Skip**: write the plan as-is.
 
 ### 6. Write the Plan
