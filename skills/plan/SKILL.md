@@ -43,7 +43,7 @@ Read the full idea document.
 ### 2. Gather Context
 
 Review the idea document thoroughly. If the idea references a project or specific files:
-- Use the Agent tool to explore the relevant parts of the codebase to understand existing patterns, conventions, and constraints. **Pin these codebase-exploration spawns to `model: sonnet`** (pass `model: sonnet` in the Agent-tool call) — exploration is capable read-only work that does not need the planner's model. Never use `subagent_type: fork` for this spawn — a fork ignores the inline `model` and silently runs on the parent model.
+- Use the Agent tool to explore the relevant parts of the codebase to understand existing patterns, conventions, and constraints. **Pin these codebase-exploration spawns to `model: sonnet`.**
 - Note what already exists that can be reused vs. what needs to be built.
 
 Carry the gathered context forward — you will hand it to the planner subagent in Step 3.

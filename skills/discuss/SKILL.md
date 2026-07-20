@@ -37,9 +37,9 @@ Engage in a back-and-forth conversation to flesh out the idea. Follow these rule
 - **Research:** If you encounter a concept or technology you're not deeply familiar with, or if the user's idea touches on something that would benefit from investigation:
   1. Tell the user what you'd like to research and why.
   2. Wait for the user to approve.
-  3. Use the Agent tool with subagents to research (can include web search, codebase exploration, etc). Pin these research subagents to `model: sonnet` — research sits at the front of the pipeline and feeds idea-shaping, so its synthesis (which can raise new questions) is judgment work, not cheap extraction, and warrants sonnet over haiku. Never use `subagent_type: fork` for these spawns — a fork ignores the inline `model` and silently runs on the parent model.
+  3. Use the Agent tool with subagents to research (can include web search, codebase exploration, etc). Pin these research subagents to `model: sonnet`.
   4. Share relevant findings. If the research raises new questions, ask them (one at a time).
-- **Codebase context:** If the discussion is happening in a project context and it would help to understand existing code, use the Agent tool (with `model: sonnet`) to explore the codebase — never with `subagent_type: fork` (a fork ignores the inline `model`). Flag what you're looking into.
+- **Codebase context:** If the discussion is happening in a project context and it would help to understand existing code, use the Agent tool (with `model: sonnet`) to explore the codebase. Flag what you're looking into.
 
 ### 3. Propose Wrapping Up
 
