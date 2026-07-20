@@ -104,7 +104,7 @@ Use `CronCreate` with:
 - **prompt**: a thin delegation wrapper that reads the asset file, interpolates variables, and delegates to a sub-agent. The prompt should be (with `<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, and `<PIPELINE>` replaced by their actual detected values):
 
 ```
-[mq:<PR_NUMBER>] Read the file `${CLAUDE_SKILL_DIR}/assets/queue-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, `<BRANCH_NAME>` with `<BRANCH_NAME>`, and `<PIPELINE>` with `<PIPELINE>`. Then pass the fully interpolated prompt to the Agent tool with description "mq-check PR #<PR_NUMBER>" and `model: haiku` (this queue-check is a mechanical CLI/JSON polling task — pin it to haiku). Print the sub-agent's returned summary.
+[mq:<PR_NUMBER>] Read the file `${CLAUDE_SKILL_DIR}/assets/queue-check-prompt.md`. In its contents, replace `<REPO>` with `<REPO>`, `<PR_NUMBER>` with `<PR_NUMBER>`, `<BRANCH_NAME>` with `<BRANCH_NAME>`, and `<PIPELINE>` with `<PIPELINE>`. Then pass the fully interpolated prompt to the Agent tool with description "mq-check PR #<PR_NUMBER>" and `model: haiku` (this queue-check is a mechanical CLI/JSON polling task — pin it to haiku; never use `subagent_type: fork`, which would ignore the pin and run on the parent model). Print the sub-agent's returned summary.
 ```
 
 In the prompt text above, all template variables (`<REPO>`, `<PR_NUMBER>`, `<BRANCH_NAME>`, `<PIPELINE>`) must be replaced with the actual values detected earlier — the cron prompt is stored with those values baked in. At cron execution time, the cron agent will read the asset file, perform the replacements, and delegate to a sub-agent via the Agent tool.

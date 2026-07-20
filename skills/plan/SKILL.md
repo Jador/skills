@@ -43,7 +43,7 @@ Read the full idea document.
 ### 2. Gather Context
 
 Review the idea document thoroughly. If the idea references a project or specific files:
-- Use the Agent tool to explore the relevant parts of the codebase to understand existing patterns, conventions, and constraints. **Pin these codebase-exploration spawns to `model: sonnet`** (pass `model: sonnet` in the Agent-tool call) — exploration is capable read-only work that does not need the planner's model.
+- Use the Agent tool to explore the relevant parts of the codebase to understand existing patterns, conventions, and constraints. **Pin these codebase-exploration spawns to `model: sonnet`** (pass `model: sonnet` in the Agent-tool call) — exploration is capable read-only work that does not need the planner's model. Never use `subagent_type: fork` for this spawn — a fork ignores the inline `model` and silently runs on the parent model.
 - Note what already exists that can be reused vs. what needs to be built.
 
 Carry the gathered context forward — you will hand it to the planner subagent in Step 3.
@@ -60,14 +60,7 @@ Delegate the decomposition reasoning to the pinned `jador:planner` subagent (Age
 
 The planner works **report-and-stop**: it does the decomposition and returns the plan draft as its result, delivered asynchronously via a completion notification. **Await that completion notification** — do not treat the spawn return as the result, and do not proactively ping the planner. Once the draft lands, carry it into Step 4 for review.
 
-The planner decomposes against these rules (it enforces them; this is what it produces):
-
-- **Small and self-contained**: Each task should be completable in a single focused effort. A task should touch a small number of files and have a clear "done" state.
-- **Specific**: Tasks should name exact files to create/modify, functions to implement, tests to write. Avoid vague tasks like "set up the backend."
-- **Ordered**: Tasks are numbered sequentially. Earlier tasks are foundational; later tasks build on them.
-- **Dependencies explicit**: Each task declares which earlier tasks (if any) must be completed first via `blocked_by`.
-- **Parallelism noted**: Tasks that can run simultaneously share a `parallel_group` label. Independent tasks with no blockers that could run at the same time should be grouped.
-- **Verified**: Every task that modifies code must include a verification step — a command to run, a test to pass, or a condition to check. Include steps to run tests, lint, and typecheck (for typed languages). There is no "where applicable" — if the task touches code, it gets a verification step.
+The **decomposition rules** the planner enforces (small/self-contained, specific, ordered, dependencies explicit, parallelism noted, verified) live in [`agents/planner.md`](../../agents/planner.md) — the planner owns them. Do **not** restate them here; that is the single source of truth for how a plan is decomposed.
 
 The planner formats its draft against the template at [assets/plan-template.md](assets/plan-template.md).
 
