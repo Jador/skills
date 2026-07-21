@@ -137,7 +137,7 @@ All actions post a **single reply** to the last new comment in the thread — th
 3. **Commit, and capture the short SHA inside the same lock.** Other workers may be running in parallel in this same worktree, so the commit MUST be a single atomic, `flock`-serialized command scoped to **only your files** — never a bare `git add` followed by a separate `git commit`. Capture the SHA **inside** the locked command too: a separate `git rev-parse` after the lock is released could read a sibling worker's commit as `HEAD`.
    ```
    SHORT_SHA=$(flock "$(git rev-parse --git-dir)/babysit-commit.lock" -c \
-     'git add -- <files> && git commit -- <files> -m "Address review feedback: <brief description of change>" >&2 && git rev-parse --short HEAD')
+     'git add -- <files> && git commit -m "Address review feedback: <brief description of change>" -- <files> >&2 && git rev-parse --short HEAD')
    ```
    Why each piece matters:
    - `flock …/babysit-commit.lock` serializes the commit against other parallel workers, so no two `git commit`s race on `.git/index.lock`.

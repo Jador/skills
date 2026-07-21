@@ -15,7 +15,7 @@ shared git worktree safe by:
 2. **Serializing + scoping each commit** with a single atomic command:
    ```
    flock "$(git rev-parse --git-dir)/babysit-commit.lock" -c \
-     'git add -- <files> && git commit -- <files> -m "…"'
+     'git add -- <files> && git commit -m "…" -- <files>'
    ```
    `flock` serializes commits so they never race on `.git/index.lock`
    (the command is short-lived, which fits flock's fd/process-lifetime

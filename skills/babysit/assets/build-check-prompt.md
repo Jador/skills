@@ -121,7 +121,7 @@ A failure is considered **related** if ANY of the following are true:
 
    ```
    COMMIT_SHA=$(flock "$(git rev-parse --git-dir)/babysit-commit.lock" -c \
-     'git add -- <files> && git commit -- <files> -m "fix: resolve <brief description of the failure>" >&2 && git rev-parse HEAD')
+     'git add -- <files> && git commit -m "fix: resolve <brief description of the failure>" -- <files> >&2 && git rev-parse HEAD')
    ```
    - `flock …/babysit-commit.lock` serializes the commit against other parallel workers so no two `git commit`s race on `.git/index.lock`.
    - `-- <files>` (explicit pathspec on **both** `add` and `commit`) guarantees you commit only the files you changed, even if another worker has staged its own files in the shared index.

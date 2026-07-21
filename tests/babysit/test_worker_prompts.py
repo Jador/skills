@@ -55,8 +55,13 @@ def test_worker_commits_are_flock_serialized_and_pathspec_scoped():
         assert "flock" in text and "git rev-parse --git-dir" in text, (
             f"{prompt.name} must lock on a worktree-local lockfile"
         )
-        assert "git commit -- <files>" in text, (
+        assert 'git commit -m "' in text and "-- <files>" in text, (
             f"{prompt.name} commit must carry an explicit pathspec"
+        )
+        # The message flag must precede the -- pathspec. `git commit -- <files>
+        # -m "…"` makes git treat -m and the message as pathspecs.
+        assert "git commit -- <files>" not in text, (
+            f"{prompt.name}: -m must come before the -- pathspec"
         )
 
 
