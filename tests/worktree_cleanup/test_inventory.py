@@ -368,6 +368,11 @@ def test_text_format_reports_category_and_dirty_override(
     assert result.returncode == 0
     assert "current-branch" not in result.stdout
     assert "untracked-branch" in result.stdout
-    assert "category=dirty_skipped" in result.stdout
+    # Task 10's text report renders categories as grouped section headers
+    # (e.g. "Dirty (skipped) (1):") rather than inline "category=..."
+    # tokens -- check the branch is listed under the right section instead.
+    dirty_section = result.stdout.split("Dirty (skipped) (")[1]
+    assert "untracked-branch" in dirty_section.splitlines()[1]
     assert "clean-branch" in result.stdout
-    assert "category=needs_review" in result.stdout
+    needs_review_section = result.stdout.split("Needs Review (")[1]
+    assert "clean-branch" in needs_review_section.splitlines()[1]
