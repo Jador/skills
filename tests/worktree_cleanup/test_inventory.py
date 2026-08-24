@@ -336,13 +336,30 @@ def test_schema1_and_schema2_produce_identical_inventory(
     assert sorted(inventory1, key=key) == sorted(inventory2, key=key)
 
 
-def test_text_format_reports_dirty_and_ignored(
+def test_text_format_reports_category_and_dirty_override(
     tmp_path, worktree_paths, run_script, fake_bins
 ):
+    """cmd_scan's text report now surfaces the categorization ladder's
+    output (Task 7) rather than the raw dirty/ignored fields directly:
+    a no-PR, clean worktree reports the Task 8 extension-point placeholder
+    category, and a no-PR but dirty worktree is forced to "dirty_skipped"
+    by the dirty override -- regardless of what the (no-PR) ladder would
+    otherwise have produced.
+    """
     entries = _entries(worktree_paths)
     fake_bins.set_responses(
         "wt",
         [{"argv_prefix": ["list", "--format=json"], "stdout": json.dumps(_schema1_fixture(entries))}],
+    )
+    fake_bins.set_responses(
+        "gh",
+        [
+            {
+                "argv_prefix": ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+                "stdout": "example/repo\n",
+            },
+            {"argv_prefix": ["pr", "list"], "stdout": "[]"},
+        ],
     )
 
     result = run_script([], env=fake_bins.env)
@@ -350,6 +367,6 @@ def test_text_format_reports_dirty_and_ignored(
     assert result.returncode == 0
     assert "current-branch" not in result.stdout
     assert "untracked-branch" in result.stdout
-    assert "dirty=true" in result.stdout
+    assert "category=dirty_skipped" in result.stdout
     assert "clean-branch" in result.stdout
-    assert "dirty=false" in result.stdout
+    assert "category=no_pr_pending" in result.stdout

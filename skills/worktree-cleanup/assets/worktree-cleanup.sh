@@ -80,6 +80,7 @@ CATEGORIES=""
 PLAN_PATH=""
 DEBUG_CONTEXT=false
 DEBUG_LOOKUP_PR=""
+DEBUG_CATEGORIZE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -119,6 +120,16 @@ while [[ $# -gt 0 ]]; do
       # per-run cache (Task 6). Used to unit-test the PR lookup layer
       # independently of scan/apply/categorization.
       DEBUG_LOOKUP_PR="${1#--debug-lookup-pr=}"
+      shift
+      ;;
+    --debug-categorize)
+      # Internal/debug hook, intentionally undocumented in `--help`: runs
+      # the full inventory + categorization ladder (Task 7) against the
+      # current repo context and prints one categorized-entry JSON line
+      # per worktree, then exits. Used to unit-test the ladder
+      # (open/merged/closed/needs_review/dirty-override) independently of
+      # cmd_scan's text/json report formatting.
+      DEBUG_CATEGORIZE=true
       shift
       ;;
     *)
@@ -442,33 +453,231 @@ wtc_lookup_pr() {
 }
 
 # ---------------------------------------------------------------------------
-# Command stubs — categorization (cross-checking GitHub PR status against
-# local commit position) and the plan-cache/apply path land in later tasks.
-# cmd_scan wires up repo-context detection (Task 4) together with the
-# inventory above (Task 5); it does not yet categorize or cache a plan.
-# wtc_lookup_pr (Task 6, above) is the PR-lookup layer the ladder (Task 7)
-# will call per-branch; cmd_scan does not invoke it yet.
+# Categorization ladder (Task 7) — for each inventoried worktree, decides
+# safety-to-remove by combining wtc_lookup_pr's single selected PR (above)
+# with a local-vs-remote tip check, then applies the dirty override on top.
+#
+# Ladder, in order:
+#   error     -- wtc_lookup_pr's `gh` call failed. Informational; not safe.
+#   open      -- an open PR exists for this branch. Informational, NEVER
+#                removable, regardless of anything else about the branch.
+#   merged    -- the selected PR is merged AND the local branch tip is the
+#                merged PR's headRefOid, or an ancestor of it (i.e. local
+#                has nothing beyond what was merged). Safe to remove.
+#   closed    -- same tip-check, against a closed (not merged) PR. Safe to
+#                remove.
+#   needs_review -- merged/closed PR selected, but the tip-check found the
+#                local branch has commits beyond the PR's headRefOid (an
+#                "N commits ahead of the {merged,closed} PR." reason is
+#                attached). Not safe -- a human should look before removing.
+#   (no_pr)   -- wtc_lookup_pr found no PR at all, ever, for this head
+#                branch. This ladder does not decide anything for that
+#                case itself -- see wtc_categorize_no_pr below.
+#
+# Dirty override (applied last, unconditionally): if the entry's `dirty`
+# flag is true, the category above is discarded and replaced with
+# "dirty_skipped", no matter what the ladder produced -- including
+# overriding "open" and "merged". This exists as defense-in-depth per
+# Task 1's empirical finding that `wt remove --no-delete-branch --foreground`
+# (never passed `-f`/`--force` by this script) already refuses any dirty
+# worktree on its own -- but the categorization layer still needs to
+# surface "dirty_skipped" as its own reported category (not just rely on
+# apply-time failure), and later apply logic (Task 12) must independently
+# re-check dirtiness before removing rather than trusting a stale plan.
+# ---------------------------------------------------------------------------
+
+# wtc_check_tip <path> <local_sha> <remote_sha>
+#
+# Prints one of:
+#   safe          -- local_sha == remote_sha, or local_sha is an ancestor
+#                    of remote_sha (local has nothing beyond remote).
+#   ahead:<N>     -- local_sha has diverged/advanced past remote_sha by N
+#                    commits (`git rev-list --count remote_sha..local_sha`).
+#   unknown       -- the ahead-count itself could not be determined (e.g.
+#                    remote_sha isn't a known object in this worktree's
+#                    local object database -- possible if the remote ref
+#                    was never fetched). Never fails the caller.
+wtc_check_tip() {
+  local path="$1" local_sha="$2" remote_sha="$3" count
+
+  if [[ "$local_sha" == "$remote_sha" ]]; then
+    echo "safe"
+    return 0
+  fi
+
+  if git -C "$path" merge-base --is-ancestor "$local_sha" "$remote_sha" 2>/dev/null; then
+    echo "safe"
+    return 0
+  fi
+
+  if count="$(git -C "$path" rev-list --count "${remote_sha}..${local_sha}" 2>/dev/null)" \
+      && [[ -n "$count" ]]; then
+    echo "ahead:${count}"
+  else
+    echo "unknown"
+  fi
+}
+
+# wtc_ladder_pr_category <path> <local_sha> <remote_sha> <state>
+#
+# <state> is "merged" or "closed" (lowercase) -- doubles as both the safe
+# category name and the label used in the needs_review reason string.
+# Prints a compact JSON object: {"category":"merged"|"closed"} when safe,
+# or {"category":"needs_review","reason":"..."} otherwise.
+wtc_ladder_pr_category() {
+  local path="$1" local_sha="$2" remote_sha="$3" state="$4" check n
+
+  check="$(wtc_check_tip "$path" "$local_sha" "$remote_sha")"
+
+  case "$check" in
+    safe)
+      jq -c -n --arg cat "$state" '{category: $cat}'
+      ;;
+    unknown)
+      jq -c -n --arg reason \
+        "unable to determine commit position relative to the ${state} PR's head ref (${remote_sha:0:8} not found in local history)." \
+        '{category: "needs_review", reason: $reason}'
+      ;;
+    *)
+      n="${check#ahead:}"
+      jq -c -n --arg reason "${n} commits ahead of the ${state} PR." \
+        '{category: "needs_review", reason: $reason}'
+      ;;
+  esac
+}
+
+# wtc_categorize_no_pr <entry_json>
+#
+# Extension point for Task 8. Called whenever wtc_lookup_pr returns
+# {"category":"no_pr"} for a branch -- i.e. no PR, of any state, has ever
+# matched this head branch. This ladder (Task 7) deliberately does not
+# decide empty/duplicate/etc. for that case; Task 8 replaces this stub's
+# body with that detection.
+#
+# Contract for Task 8: receives the full normalized inventory entry
+# (branch, path, sha, dirty, staged/modified/untracked/renamed/deleted,
+# ignored_count) as a single JSON object in $1, and must print exactly one
+# compact JSON object on stdout carrying at least a "category" key,
+# consistent with the shapes wtc_categorize_entry merges onto the entry
+# below (e.g. {"category":"empty"} or {"category":"duplicate","reason":
+# "..."}). Until Task 8 lands, this returns a clearly-provisional
+# placeholder category ("no_pr_pending") rather than guessing -- so scan
+# output never silently mislabels a no-PR branch as safe or unsafe.
+wtc_categorize_no_pr() {
+  local entry_json="$1"
+  echo '{"category":"no_pr_pending"}'
+}
+
+# wtc_categorize_entry <entry_json> <repo_slug>
+#
+# Runs the full ladder (including the dirty override) for one normalized
+# inventory entry (as produced by wtc_inventory) and prints the entry with
+# categorization fields merged on top: at minimum "category", plus
+# "reason" (needs_review, dirty_skipped) and/or "pr_number"/"pr_title"/
+# "pr_url" (whenever a PR was selected, so reports can cite it) when
+# applicable.
+wtc_categorize_entry() {
+  local entry_json="$1" repo_slug="$2"
+  local branch path sha dirty lookup lookup_category state remote_sha ladder
+
+  branch="$(jq -r '.branch' <<<"$entry_json")"
+  path="$(jq -r '.path' <<<"$entry_json")"
+  sha="$(jq -r '.sha' <<<"$entry_json")"
+  dirty="$(jq -r '.dirty' <<<"$entry_json")"
+
+  lookup="$(wtc_lookup_pr "$branch" "$repo_slug")"
+  lookup_category="$(jq -r '.category' <<<"$lookup")"
+
+  if [[ "$lookup_category" == "error" ]]; then
+    ladder='{"category":"error"}'
+  elif [[ "$lookup_category" == "no_pr" ]]; then
+    ladder="$(wtc_categorize_no_pr "$entry_json")"
+  else
+    state="$(jq -r '.state' <<<"$lookup" | tr '[:upper:]' '[:lower:]')"
+    case "$state" in
+      open)
+        ladder="$(jq -c '{category: "open", pr_number: .number, pr_title: .title, pr_url: .url}' <<<"$lookup")"
+        ;;
+      merged|closed)
+        remote_sha="$(jq -r '.headRefOid' <<<"$lookup")"
+        ladder="$(wtc_ladder_pr_category "$path" "$sha" "$remote_sha" "$state")"
+        ladder="$(jq -c --argjson base "$ladder" \
+          '$base + {pr_number: .number, pr_title: .title, pr_url: .url}' <<<"$lookup")"
+        ;;
+      *)
+        # Defensive only: `gh` only ever reports OPEN/MERGED/CLOSED for
+        # pull requests, so this should be unreachable in practice.
+        ladder="$(jq -c -n --arg state "$state" \
+          '{category: "needs_review", reason: ("unrecognized PR state: " + $state)}')"
+        ;;
+    esac
+  fi
+
+  # Dirty override: applied last, unconditionally, discarding whatever
+  # the ladder produced above -- see the section header comment.
+  if [[ "$dirty" == "true" ]]; then
+    ladder='{"category":"dirty_skipped","reason":"worktree has uncommitted changes (dirty override)"}'
+  fi
+
+  jq -c --argjson base "$ladder" '. + $base' <<<"$entry_json"
+}
+
+# wtc_categorize_all <inventory_json_array> <repo_slug>
+#
+# Runs wtc_categorize_entry over every entry in an inventory array (as
+# produced by wtc_inventory) and prints the categorized result as a single
+# JSON array. A bash loop (not a pure jq map) because wtc_categorize_entry
+# calls wtc_lookup_pr, which mutates the module-level PR cache and shells
+# out to git/gh per entry.
+wtc_categorize_all() {
+  local inventory_json="$1" repo_slug="$2"
+  local line result
+  local -a results
+
+  results=()
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    result="$(wtc_categorize_entry "$line" "$repo_slug")"
+    results+=("$result")
+  done <<<"$(jq -c '.[]' <<<"$inventory_json")"
+
+  if (( ${#results[@]} > 0 )); then
+    printf '%s\n' "${results[@]}" | jq -s -c '.'
+  else
+    echo "[]"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Command stubs — the plan-cache/apply path lands in a later task.
+# cmd_scan wires up repo-context detection (Task 4), the inventory (Task
+# 5), and the categorization ladder (Task 7, above) -- it does not yet
+# write the plan to the cache path. Task 8 still owes wtc_categorize_no_pr
+# (above) its real empty/duplicate detection; until then no-PR branches
+# report the provisional "no_pr_pending" category (never "safe" to apply).
 # ---------------------------------------------------------------------------
 
 cmd_scan() {
-  local repo_slug default_branch cache_path inventory
+  local repo_slug default_branch cache_path inventory categorized
   repo_slug="$(detect_repo_slug)"
   default_branch="$(detect_default_branch)"
   cache_path="$(plan_cache_path)"
   inventory="$(wtc_inventory)"
+  categorized="$(wtc_categorize_all "$inventory" "$repo_slug")"
 
-  # TODO(later task): cross-check GitHub PR status via `${GH_BIN}` (using
-  # repo_slug/default_branch), categorize each worktree, and write the plan
-  # to ${cache_path}. Until then, --format=json surfaces the raw normalized
-  # inventory, and the text report is a plain per-worktree listing.
+  # TODO(later task): write ${categorized} to ${cache_path} as the cached
+  # plan for --apply to load. Until then, --format=json surfaces the
+  # categorized entries directly, and the text report is a per-worktree
+  # summary.
   if [[ "$FORMAT" == "json" ]]; then
-    printf '%s\n' "$inventory"
+    printf '%s\n' "$categorized"
   else
-    printf '%s\n' "$inventory" | jq -r '
+    printf '%s\n' "$categorized" | jq -r '
       if length == 0 then
         "No worktrees to report (only the main/current worktree exists)."
       else
-        .[] | "\(.branch)\t\(.path)\tdirty=\(.dirty)\tignored=\(.ignored_count)"
+        .[] | "\(.branch)\t\(.path)\tcategory=\(.category)"
+          + (if .reason then "\treason=\(.reason)" else "" end)
       end
     '
   fi
@@ -505,11 +714,26 @@ cmd_debug_lookup_pr() {
   done
 }
 
+cmd_debug_categorize() {
+  # Internal/debug hook for --debug-categorize: runs the inventory +
+  # categorization ladder against the current repo context and prints one
+  # categorized-entry JSON line per worktree (see: Task 7 verification
+  # step). Unlike cmd_scan, this bypasses --format entirely -- always one
+  # compact JSON object per line, never an array -- to keep ad-hoc/test
+  # assertions on individual entries simple.
+  local repo_slug categorized
+  repo_slug="$(detect_repo_slug)"
+  categorized="$(wtc_categorize_all "$(wtc_inventory)" "$repo_slug")"
+  printf '%s\n' "$categorized" | jq -c '.[]'
+}
+
 main() {
   if [[ "$DEBUG_CONTEXT" == "true" ]]; then
     cmd_debug_context
   elif [[ -n "$DEBUG_LOOKUP_PR" ]]; then
     cmd_debug_lookup_pr
+  elif [[ "$DEBUG_CATEGORIZE" == "true" ]]; then
+    cmd_debug_categorize
   elif [[ "$APPLY" == "true" ]]; then
     cmd_apply
   else
