@@ -79,6 +79,7 @@ APPLY=false
 CATEGORIES=""
 PLAN_PATH=""
 DEBUG_CONTEXT=false
+DEBUG_LOOKUP_PR=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -108,6 +109,16 @@ while [[ $# -gt 0 ]]; do
       # exits. Used to verify repo-context detection independently of the
       # scan/apply flows (e.g. across worktrees of the same repo).
       DEBUG_CONTEXT=true
+      shift
+      ;;
+    --debug-lookup-pr=*)
+      # Internal/debug hook, intentionally undocumented in `--help`: runs
+      # wtc_lookup_pr for each comma-separated branch in order (repo_slug
+      # resolved via detect_repo_slug) and prints one JSON result line per
+      # branch, then exits. A branch repeated in the list exercises the
+      # per-run cache (Task 6). Used to unit-test the PR lookup layer
+      # independently of scan/apply/categorization.
+      DEBUG_LOOKUP_PR="${1#--debug-lookup-pr=}"
       shift
       ;;
     *)
@@ -317,10 +328,126 @@ wtc_inventory() {
 }
 
 # ---------------------------------------------------------------------------
+# PR lookup layer — per-branch `gh pr list` lookup with selection and
+# caching. Later categorization tasks (7, 8) build the removability ladder
+# on top of this; this layer only answers "what is THE pull request for
+# this head branch, if any" — it never decides what to do with the answer.
+#
+# wtc_lookup_pr <branch> <repo_slug> prints exactly one line of JSON to
+# stdout, one of:
+#   {"category":"error"}                                   gh exited non-zero
+#   {"category":"no_pr"}                                    gh succeeded, 0 PRs match
+#   {"category":"pr","state":...,"number":...,"title":...,
+#    "url":...,"headRefOid":...}                            gh succeeded, PR selected
+#
+# A non-zero `gh` exit always yields "error" — it never falls through to
+# "no_pr" (a real API/auth/network failure must not be silently treated as
+# "nothing to clean up here").
+#
+# Selection precedence (this layer owns it; Task 7's ladder never sees more
+# than one PR per branch and never re-derives this): a head branch can
+# carry more than one PR after being reused (e.g. an earlier PR was closed,
+# then the same branch was pushed again and opened a new PR). Among all
+# PRs matching the head branch:
+#   - any OPEN PR wins outright, regardless of the other PRs' states;
+#   - otherwise the most recently MERGED PR wins;
+#   - otherwise the most recently CLOSED PR wins.
+# `gh` reports state in uppercase (OPEN/MERGED/CLOSED); comparison here is
+# case-insensitive regardless.
+#
+# Caching: results are cached per-branch for the lifetime of the current
+# script invocation (module-level indexed arrays — bash 3.2 has no
+# associative arrays) so repeated lookups of the same branch within one run
+# never re-invoke `gh`.
+# ---------------------------------------------------------------------------
+WTC_PR_CACHE_BRANCHES=()
+WTC_PR_CACHE_RESULTS=()
+
+# wtc_pr_cache_get <branch>
+#
+# Prints the cached result for <branch> and returns 0 on a cache hit;
+# returns 1 (prints nothing) on a miss.
+wtc_pr_cache_get() {
+  local branch="$1" i
+  for (( i=0; i<${#WTC_PR_CACHE_BRANCHES[@]}; i++ )); do
+    if [[ "${WTC_PR_CACHE_BRANCHES[$i]}" == "$branch" ]]; then
+      printf '%s\n' "${WTC_PR_CACHE_RESULTS[$i]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# wtc_pr_cache_set <branch> <result-json>
+wtc_pr_cache_set() {
+  WTC_PR_CACHE_BRANCHES+=("$1")
+  WTC_PR_CACHE_RESULTS+=("$2")
+}
+
+# wtc_select_pr <raw-json-array-on-stdin>
+#
+# Applies the open > merged > closed precedence (ties broken by most
+# recent mergedAt/closedAt/updatedAt) to a `gh pr list --json ...` array and
+# prints the single selected-PR result object described above. Split out
+# from wtc_lookup_pr so the selection logic itself is a pure, independently
+# testable jq transform.
+wtc_select_pr() {
+  jq -c '
+    def rank:
+      (.state | ascii_downcase) as $s
+      | if $s == "open" then 0
+        elif $s == "merged" then 1
+        else 2
+        end;
+    def recency: (.mergedAt // .closedAt // .updatedAt // "");
+    if length == 0 then
+      {category: "no_pr"}
+    else
+      (map(rank) | min) as $minrank
+      | (map(select(rank == $minrank)) | sort_by(recency) | .[-1]) as $winner
+      | {
+          category: "pr",
+          state: $winner.state,
+          number: $winner.number,
+          title: $winner.title,
+          url: $winner.url,
+          headRefOid: $winner.headRefOid
+        }
+    end
+  '
+}
+
+# wtc_lookup_pr <branch> <repo_slug>
+#
+# See section header above for the returned JSON shapes and precedence
+# contract. Caches its result per-branch (see wtc_pr_cache_get/set).
+wtc_lookup_pr() {
+  local branch="$1" repo_slug="$2" cached raw result
+
+  if cached="$(wtc_pr_cache_get "$branch")"; then
+    printf '%s\n' "$cached"
+    return 0
+  fi
+
+  if raw="$("$GH_BIN" pr list --repo "$repo_slug" --head "$branch" --state all \
+      --json state,number,title,url,headRefOid,mergedAt,closedAt,updatedAt \
+      2>/dev/null)"; then
+    result="$(printf '%s' "$raw" | wtc_select_pr)"
+  else
+    result='{"category":"error"}'
+  fi
+
+  wtc_pr_cache_set "$branch" "$result"
+  printf '%s\n' "$result"
+}
+
+# ---------------------------------------------------------------------------
 # Command stubs — categorization (cross-checking GitHub PR status against
 # local commit position) and the plan-cache/apply path land in later tasks.
 # cmd_scan wires up repo-context detection (Task 4) together with the
 # inventory above (Task 5); it does not yet categorize or cache a plan.
+# wtc_lookup_pr (Task 6, above) is the PR-lookup layer the ladder (Task 7)
+# will call per-branch; cmd_scan does not invoke it yet.
 # ---------------------------------------------------------------------------
 
 cmd_scan() {
@@ -366,9 +493,23 @@ cmd_debug_context() {
   echo "plan_cache_path=$(plan_cache_path)"
 }
 
+cmd_debug_lookup_pr() {
+  # Internal/debug hook for --debug-lookup-pr=<comma-list>: prints one
+  # wtc_lookup_pr JSON result per listed branch, in order (see: Task 6
+  # verification step).
+  local repo_slug branch
+  repo_slug="$(detect_repo_slug)"
+  local IFS=','
+  for branch in $DEBUG_LOOKUP_PR; do
+    wtc_lookup_pr "$branch" "$repo_slug"
+  done
+}
+
 main() {
   if [[ "$DEBUG_CONTEXT" == "true" ]]; then
     cmd_debug_context
+  elif [[ -n "$DEBUG_LOOKUP_PR" ]]; then
+    cmd_debug_lookup_pr
   elif [[ "$APPLY" == "true" ]]; then
     cmd_apply
   else
