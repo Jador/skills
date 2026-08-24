@@ -17,6 +17,7 @@ Personal productivity skills for Claude Code.
 | **Notepad** | `/jador:notepad` | Quick scratch pad for capturing, listing, and managing ideas |
 | **Prune Comments** | `/jador:prune-comments` | Hunts unjustified comments in a changeset or file list via the read-only `jador:comment-auditor` agent and deletes them, keeping only the fixed exception list — asks the user only on genuine judgment calls, and fixes `MUST KILL` symbols at root-cause scope |
 | **Skill Builder** | `/jador:skill-builder` | Scaffold new Claude Code skills through guided conversation |
+| **Worktree Cleanup** | `/jador:worktree-cleanup` | Scan git worktrees, categorize each by safety-to-remove via GitHub PR status and local commit position, and remove the ones you approve |
 
 ## Workflow
 
@@ -38,7 +39,8 @@ claude plugin install jador@skills
 
 ## Requirements
 
-- **gh CLI** — required by babysit and mq skills ([install](https://cli.github.com/))
+- **gh CLI** — required by babysit, mq, and worktree-cleanup skills ([install](https://cli.github.com/))
 - **bk CLI** — required by babysit and mq skills for Buildkite integration
-- **jq** — used by babysit and mq cron agents for JSON parsing
+- **jq** — used by babysit, mq, and worktree-cleanup for JSON parsing
+- **wt (worktrunk) CLI** — required by the worktree-cleanup skill for worktree inventory and removal ([install](https://github.com/max-sixty/worktrunk))
 
