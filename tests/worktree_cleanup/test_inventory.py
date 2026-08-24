@@ -276,7 +276,11 @@ def test_inventory_normalizes_both_schemas(
     assert "schema" not in result.stdout
     assert "schema" not in result.stderr
 
-    inventory = json.loads(result.stdout)
+    # Task 11: --format=json prints the full plan object (generated_at/
+    # repo/default_branch/entries[]) -- the same schema written to the
+    # plan cache -- not a bare array of entries.
+    plan = json.loads(result.stdout)
+    inventory = plan["entries"]
 
     # --- main/current exclusion ---
     branches = {e["branch"] for e in inventory}
@@ -329,8 +333,10 @@ def test_schema1_and_schema2_produce_identical_inventory(
     assert result1.returncode == 0
     assert result2.returncode == 0
 
-    inventory1 = json.loads(result1.stdout)
-    inventory2 = json.loads(result2.stdout)
+    # Task 11: unwrap the plan object's entries[] -- see the comment in
+    # test_inventory_normalizes_both_schemas above.
+    inventory1 = json.loads(result1.stdout)["entries"]
+    inventory2 = json.loads(result2.stdout)["entries"]
 
     key = lambda e: e["branch"]  # noqa: E731
     assert sorted(inventory1, key=key) == sorted(inventory2, key=key)

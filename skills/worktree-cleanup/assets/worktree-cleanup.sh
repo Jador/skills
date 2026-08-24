@@ -827,28 +827,39 @@ wtc_now() {
   fi
 }
 
-# wtc_write_plan_cache <categorized_entries_json_array> <repo_slug> <default_branch> <cache_path>
+# wtc_build_plan_json <categorized_entries_json_array> <repo_slug> <default_branch>
 #
-# Assembles the plan JSON --
+# Assembles and prints the plan JSON object --
 #   {"generated_at":..., "repo":..., "default_branch":..., "entries":[...]}
-# -- and writes it atomically to <cache_path>: first to a temp file created
-# via `mktemp` in the *same directory* as <cache_path> (atomic `mv` requires
-# same filesystem), then `mv`'d over the final path. The temp file is
-# cleaned up if the write to it fails, so no stray temp file is ever left
-# behind on either the success or failure path.
-wtc_write_plan_cache() {
-  local categorized_json="$1" repo_slug="$2" default_branch="$3" cache_path="$4"
-  local cache_dir tmp_file plan_json
-
-  cache_dir="$(dirname "$cache_path")"
-  tmp_file="$(mktemp "${cache_dir}/.worktree-cleanup-plan.XXXXXX")"
-
-  plan_json="$(jq -c -n \
+# -- the single source of truth for the plan's shape. Both the cache
+# writer (wtc_write_plan_cache, below) and cmd_scan's `--format=json`
+# stdout printer call this exact function, so the object written to disk
+# and the object printed to stdout are always byte-for-byte identical --
+# never built twice and never allowed to drift apart.
+wtc_build_plan_json() {
+  local categorized_json="$1" repo_slug="$2" default_branch="$3"
+  jq -c -n \
     --arg generated_at "$(wtc_now)" \
     --arg repo "$repo_slug" \
     --arg default_branch "$default_branch" \
     --argjson entries "$categorized_json" \
-    '{generated_at: $generated_at, repo: $repo, default_branch: $default_branch, entries: $entries}')"
+    '{generated_at: $generated_at, repo: $repo, default_branch: $default_branch, entries: $entries}'
+}
+
+# wtc_write_plan_cache <plan_json> <cache_path>
+#
+# Writes the already-assembled plan JSON (see wtc_build_plan_json)
+# atomically to <cache_path>: first to a temp file created via `mktemp` in
+# the *same directory* as <cache_path> (atomic `mv` requires same
+# filesystem), then `mv`'d over the final path. The temp file is cleaned
+# up if the write to it fails, so no stray temp file is ever left behind
+# on either the success or failure path.
+wtc_write_plan_cache() {
+  local plan_json="$1" cache_path="$2"
+  local cache_dir tmp_file
+
+  cache_dir="$(dirname "$cache_path")"
+  tmp_file="$(mktemp "${cache_dir}/.worktree-cleanup-plan.XXXXXX")"
 
   if ! printf '%s\n' "$plan_json" > "$tmp_file"; then
     rm -f "$tmp_file"
@@ -865,18 +876,50 @@ wtc_write_plan_cache() {
 # later task.
 # ---------------------------------------------------------------------------
 
+# wtc_emit_scan_warnings <categorized_entries_json_array>
+#
+# Task 11: stdout/stderr discipline. With --format=json, cmd_scan's stdout
+# must carry the plan JSON and nothing else — any diagnostic/warning
+# chatter about the scan has to go to stderr instead, so a consumer (e.g.
+# the skill invoking this script with --format=json) can parse stdout
+# directly without stripping anything out.
+#
+# This prints one warning line per "error" category entry (a `gh` call
+# failed for that branch's PR lookup — see wtc_lookup_pr) to stderr, naming
+# the branch. It is called unconditionally from cmd_scan (both formats),
+# never touches stdout, and is a no-op when there are no "error" entries.
+wtc_emit_scan_warnings() {
+  local categorized_json="$1" line branch
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    branch="$(jq -r '.branch' <<<"$line")"
+    echo "WARNING: PR lookup failed for branch '${branch}' (gh error); categorized as 'error' -- verify manually." >&2
+  done <<<"$(jq -c '.[] | select(.category == "error")' <<<"$categorized_json")"
+}
+
 cmd_scan() {
-  local repo_slug default_branch cache_path inventory categorized
+  local repo_slug default_branch cache_path inventory categorized plan_json
   repo_slug="$(detect_repo_slug)"
   default_branch="$(detect_default_branch)"
   cache_path="$(plan_cache_path)"
   inventory="$(wtc_inventory)"
   categorized="$(wtc_categorize_all "$inventory" "$repo_slug" "$default_branch")"
 
-  wtc_write_plan_cache "$categorized" "$repo_slug" "$default_branch" "$cache_path"
+  # Built once (wtc_build_plan_json) and reused for both the cache write
+  # and the --format=json stdout print below, so the two are always
+  # identical -- see that function's header comment.
+  plan_json="$(wtc_build_plan_json "$categorized" "$repo_slug" "$default_branch")"
+
+  wtc_write_plan_cache "$plan_json" "$cache_path"
+
+  wtc_emit_scan_warnings "$categorized"
 
   if [[ "$FORMAT" == "json" ]]; then
-    printf '%s\n' "$categorized"
+    # Task 11: stdout carries ONLY the plan JSON here -- no progress or
+    # diagnostic text before or after it. Any such chatter (see
+    # wtc_emit_scan_warnings above) goes to stderr instead, so a consumer
+    # (e.g. the worktree-cleanup skill) can parse this line directly.
+    printf '%s\n' "$plan_json"
   else
     printf '%s\n' "$categorized" | jq -r '
       if length == 0 then
