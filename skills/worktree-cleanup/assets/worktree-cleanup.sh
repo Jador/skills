@@ -197,22 +197,154 @@ plan_cache_path() {
 }
 
 # ---------------------------------------------------------------------------
-# Command stubs — inventory/categorization logic and the apply path land in
-# later tasks. This task only wires repo-context detection up ahead of
-# those stubs so those tasks have resolved values to hook in.
+# Worktree inventory — parse `wt list --format=json` into one normalized
+# shape regardless of which on-disk schema `wt` emits.
+#
+# `wt` v0.74.0 defaults to "schema 1" (a bare JSON array; each element has
+# top-level `is_main`/`is_current`/`path`/`working_tree{...}`) but warns on
+# stderr that a future release switches the default to "schema 2" (an
+# envelope `{schema, repo, collected, items: [...]}`; each item nests the
+# same information under `worktree.main`/`worktree.current`/`worktree.path`/
+# `worktree.changes{...}`). Both shapes were captured empirically from a
+# real `wt v0.74.0` install (see Task 5 report) and are handled here so the
+# script keeps working across the schema flip.
+#
+# The deprecation warning goes to stderr — it is intentionally discarded
+# (never merged onto stdout with 2>&1, which would corrupt the JSON we
+# parse).
+# ---------------------------------------------------------------------------
+
+# wtc_normalize_wt_json <raw-json-on-stdin>
+#
+# Reads a `wt list --format=json` document (either schema shape) on stdin
+# and writes one compact JSON object per line on stdout, one per worktree
+# *excluding* the main worktree and the current worktree (`is_main`/
+# `is_current`, however schema 2 spells them). Each object carries:
+#   branch, path, sha, staged, modified, untracked, renamed, deleted, dirty
+# `dirty` is derived (not read from `wt`): true if any of
+# staged/modified/untracked/renamed/deleted is true. Untracked counts as
+# dirty because `wt remove` refuses an untracked-only worktree without `-f`
+# (confirmed empirically in Task 1's spike).
+wtc_normalize_wt_json() {
+  jq -c '
+    def entries: if type == "array" then . else .items end;
+    entries
+    | map(
+        if has("is_main") then
+          # schema 1: bare array, flat is_main/is_current/path, working_tree{}
+          {
+            branch: .branch,
+            path: .path,
+            sha: .commit.sha,
+            is_main: .is_main,
+            is_current: .is_current,
+            staged: .working_tree.staged,
+            modified: .working_tree.modified,
+            untracked: .working_tree.untracked,
+            renamed: .working_tree.renamed,
+            deleted: .working_tree.deleted
+          }
+        else
+          # schema 2: enveloped, is_main/is_current/path/changes nested
+          # under .worktree, sha nested under .head
+          {
+            branch: .branch,
+            path: .worktree.path,
+            sha: .head.sha,
+            is_main: .worktree.main,
+            is_current: .worktree.current,
+            staged: .worktree.changes.staged,
+            modified: .worktree.changes.modified,
+            untracked: .worktree.changes.untracked,
+            renamed: .worktree.changes.renamed,
+            deleted: .worktree.changes.deleted
+          }
+        end
+      )
+    | map(select((.is_main | not) and (.is_current | not)))
+    | map(. + {dirty: (.staged or .modified or .untracked or .renamed or .deleted)})
+    | map(del(.is_main, .is_current))
+    | .[]
+  '
+}
+
+# wtc_ignored_count <worktree-path>
+#
+# Counts ignored files in the given worktree via
+# `git status --ignored --short`, matching lines that start with `!!`
+# (git's porcelain marker for an ignored path). Never fails the caller: a
+# missing/invalid path just yields 0, since `wt list` output could be
+# momentarily stale relative to the filesystem.
+wtc_ignored_count() {
+  local path="$1" count
+  count="$(git -C "$path" status --ignored --short 2>/dev/null | grep -c '^!!' || true)"
+  echo "${count:-0}"
+}
+
+# wtc_inventory
+#
+# Fetches `wt list --format=json`, normalizes it (excluding main/current),
+# and augments each entry with an `ignored_count` (files ignored per
+# `.gitignore`, counted via `wtc_ignored_count`; not read from `wt`, which
+# doesn't report it). Writes a single JSON array to stdout.
+wtc_inventory() {
+  local raw normalized line path count merged
+  local -a results
+
+  raw="$("$WT_BIN" list --format=json 2>/dev/null)"
+
+  if [[ -z "$raw" ]]; then
+    echo "[]"
+    return 0
+  fi
+
+  normalized="$(printf '%s' "$raw" | wtc_normalize_wt_json)"
+
+  results=()
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    path="$(jq -r '.path' <<<"$line")"
+    count="$(wtc_ignored_count "$path")"
+    merged="$(jq -c --argjson ignored "$count" '. + {ignored_count: $ignored}' <<<"$line")"
+    results+=("$merged")
+  done <<<"$normalized"
+
+  if (( ${#results[@]} > 0 )); then
+    printf '%s\n' "${results[@]}" | jq -s -c '.'
+  else
+    echo "[]"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Command stubs — categorization (cross-checking GitHub PR status against
+# local commit position) and the plan-cache/apply path land in later tasks.
+# cmd_scan wires up repo-context detection (Task 4) together with the
+# inventory above (Task 5); it does not yet categorize or cache a plan.
 # ---------------------------------------------------------------------------
 
 cmd_scan() {
-  local repo_slug default_branch cache_path
+  local repo_slug default_branch cache_path inventory
   repo_slug="$(detect_repo_slug)"
   default_branch="$(detect_default_branch)"
   cache_path="$(plan_cache_path)"
+  inventory="$(wtc_inventory)"
 
-  # TODO(later task): inventory worktrees via `${WT_BIN} list --format=json`,
-  # cross-check GitHub PR status via `${GH_BIN}`, categorize each worktree,
-  # write the plan to ${cache_path}, then print the report in $FORMAT.
-  echo "TODO: scan not yet implemented (format=${FORMAT}, repo=${repo_slug}, default_branch=${default_branch}, cache=${cache_path})" >&2
-  return 1
+  # TODO(later task): cross-check GitHub PR status via `${GH_BIN}` (using
+  # repo_slug/default_branch), categorize each worktree, and write the plan
+  # to ${cache_path}. Until then, --format=json surfaces the raw normalized
+  # inventory, and the text report is a plain per-worktree listing.
+  if [[ "$FORMAT" == "json" ]]; then
+    printf '%s\n' "$inventory"
+  else
+    printf '%s\n' "$inventory" | jq -r '
+      if length == 0 then
+        "No worktrees to report (only the main/current worktree exists)."
+      else
+        .[] | "\(.branch)\t\(.path)\tdirty=\(.dirty)\tignored=\(.ignored_count)"
+      end
+    '
+  fi
 }
 
 cmd_apply() {
