@@ -870,6 +870,142 @@ wtc_write_plan_cache() {
 }
 
 # ---------------------------------------------------------------------------
+# Apply flow (Task 12) — loads a previously cached plan (never re-scans),
+# validates the requested categories against the safe set, re-verifies
+# per-entry sha/dirty drift immediately before each removal, and removes
+# surviving entries via `wt remove --no-delete-branch --foreground
+# --format=json`.
+# ---------------------------------------------------------------------------
+
+# Safe-to-apply categories. `dirty_skipped`, `open`, `needs_review`, and
+# `error` are all deliberately excluded -- see the categorization ladder's
+# section header above.
+WTC_SAFE_CATEGORIES="merged closed empty duplicate"
+
+# wtc_is_safe_category <category>
+#
+# Returns 0 if <category> is one of the four safe-to-apply categories,
+# 1 otherwise. A tiny helper so the membership check has one definition
+# shared by both the validation loop and the hard dirty_skipped exclusion.
+wtc_is_safe_category() {
+  local category="$1" c
+  for c in $WTC_SAFE_CATEGORIES; do
+    [[ "$c" == "$category" ]] && return 0
+  done
+  return 1
+}
+
+# wtc_epoch_from_iso8601 <iso8601-utc-string>
+#
+# Converts a `generated_at`-shaped timestamp (`%Y-%m-%dT%H:%M:%SZ`) to Unix
+# epoch seconds. Tries macOS/BSD `date -j -f` first, falls back to GNU
+# `date -d` (mirrors the stat -f/-c fallback pattern used by
+# wtc_dir_mtime, for the same "works on both macOS and Linux" reason).
+# Never fails the caller: prints "0" if both parse attempts fail (e.g. a
+# malformed or missing timestamp), which callers treat as "unknown age,
+# don't warn" rather than crashing the apply flow over a cosmetic staleness
+# check.
+wtc_epoch_from_iso8601() {
+  local iso="$1" epoch
+  epoch="$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$iso" +%s 2>/dev/null || true)"
+  if [[ -z "$epoch" ]]; then
+    epoch="$(date -u -d "$iso" +%s 2>/dev/null || true)"
+  fi
+  echo "${epoch:-0}"
+}
+
+# wtc_wt_remove <branch>
+#
+# Runs `${WT_BIN} remove --no-delete-branch --foreground --format=json
+# <branch>` -- never any of `-f`/`--force`/`-D`/`--force-delete` -- and
+# prints a single compact JSON object describing the script's own outcome
+# for this removal:
+#   {"outcome":"failed","detail":"<stderr text>"}   -- non-zero exit.
+#   {"outcome":"deleted"}                            -- exit 0, and wt's own
+#                                                        stderr reported the
+#                                                        branch as
+#                                                        "Branch integrated"
+#                                                        (merged into / an
+#                                                        ancestor of the
+#                                                        currently checked
+#                                                        out branch).
+#   {"outcome":"retained_unmerged"}                  -- exit 0, but wt's
+#                                                        stderr did not
+#                                                        report the branch
+#                                                        as integrated (the
+#                                                        worktree is gone;
+#                                                        the branch survives
+#                                                        as a plain,
+#                                                        unmerged-per-wt
+#                                                        local branch).
+#
+# Empirically (see NOTES-task1-wt-remove-findings.md, and this task's own
+# scratch-clone verification), `wt remove --format=json`'s own
+# `branch_outcome` field is *always* "not_attempted" whenever
+# `--no-delete-branch` is passed -- because that flag makes wt skip its own
+# branch-deletion attempt entirely, so the field can never distinguish
+# "would have been deleted" from "wouldn't have been". That is exactly why
+# this script never trusts that field: the deleted/retained_unmerged split
+# above is derived instead from the exit code plus wt's human-readable
+# stderr text (the "Branch integrated (...); retained with
+# --no-delete-branch" line vs. its absence), which was observed to reliably
+# track whether wt's own merge-check considered the branch fully
+# incorporated.
+wtc_wt_remove() {
+  local branch="$1" stdout_file stderr_file exit_code stderr_text
+
+  stdout_file="$(mktemp)"
+  stderr_file="$(mktemp)"
+
+  if "$WT_BIN" remove --no-delete-branch --foreground --format=json "$branch" \
+      >"$stdout_file" 2>"$stderr_file"; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+
+  stderr_text="$(cat "$stderr_file")"
+  rm -f "$stdout_file" "$stderr_file"
+
+  if [[ "$exit_code" -ne 0 ]]; then
+    jq -c -n --arg detail "$stderr_text" '{outcome: "failed", detail: $detail}'
+  elif [[ "$stderr_text" == *"Branch integrated"* ]]; then
+    jq -c -n '{outcome: "deleted"}'
+  else
+    jq -c -n '{outcome: "retained_unmerged"}'
+  fi
+}
+
+# wtc_print_apply_summary <json-lines-on-stdin>
+#
+# Prints the final per-branch outcome report from one compact JSON object
+# per line on stdin (branch/category/outcome, plus reason for
+# skipped_drift/failed), then -- only if at least one entry was
+# skipped_drift -- a closing note telling the user to re-scan to pick those
+# entries back up on a future apply.
+wtc_print_apply_summary() {
+  local combined has_drift
+
+  combined="$(jq -s -c '.')"
+
+  echo
+  echo "=== Apply summary ==="
+  if [[ "$(jq 'length' <<<"$combined")" -eq 0 ]]; then
+    echo "No plan entries matched the requested categories."
+    return 0
+  fi
+
+  jq -r '.[] | "\(.branch)\t\(.category)\t\(.outcome)"
+    + (if .reason then "\treason=\(.reason)" else "" end)' <<<"$combined"
+
+  has_drift="$(jq '[.[] | select(.outcome == "skipped_drift")] | length > 0' <<<"$combined")"
+  if [[ "$has_drift" == "true" ]]; then
+    echo
+    echo "Note: one or more entries were skipped due to drift since the plan was scanned. Re-run a scan to pick them up on a future --apply."
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Human-readable text report (Task 10) — renders the categorized entries as
 # a plain-text report for the default (`--format=text`) scan output. The
 # JSON output path (`--format=json`, in cmd_scan below) is untouched by
@@ -1009,14 +1145,130 @@ cmd_scan() {
 }
 
 cmd_apply() {
-  local cache_path
+  local cache_path plan_json target_categories cat generated_at gen_epoch
+  local now_epoch age_seconds filtered_entries entry branch path category
+  local recorded_sha current_sha porcelain remove_result outcome detail
+  local -a target_list summary_results
+  local any_failed=false
+
+  # --- 1. Determine plan path. -------------------------------------------
   cache_path="${PLAN_PATH:-$(plan_cache_path)}"
 
-  # TODO(later task): load the cached plan from ${cache_path}, filter to
-  # $CATEGORIES, and remove each via
-  # `${WT_BIN} remove --no-delete-branch <worktree>`.
-  echo "TODO: apply not yet implemented (categories=${CATEGORIES:-<all>}, plan=${cache_path})" >&2
-  return 1
+  if [[ ! -f "$cache_path" ]]; then
+    echo "ERROR: no cached plan found at '${cache_path}'." >&2
+    echo "Run '${SCRIPT_NAME}' (without --apply) first to scan and cache a plan, or pass --plan=<path> to an existing plan file." >&2
+    exit 1
+  fi
+
+  # --- 2. Load and parse the plan JSON. -----------------------------------
+  if ! plan_json="$(cat "$cache_path")" || ! jq -e . >/dev/null 2>&1 <<<"$plan_json"; then
+    echo "ERROR: plan file at '${cache_path}' could not be parsed as JSON." >&2
+    exit 1
+  fi
+
+  if ! jq -e '(.entries | type) == "array"' >/dev/null 2>&1 <<<"$plan_json"; then
+    echo "ERROR: plan file at '${cache_path}' is missing an 'entries' array." >&2
+    exit 1
+  fi
+
+  # --- 3. Determine and validate target categories. -----------------------
+  # Every named category must be in the safe set before anything else
+  # happens -- no filtering, no staleness check, no removal.
+  target_categories="${CATEGORIES:-merged,closed,empty,duplicate}"
+
+  local IFS=','
+  target_list=($target_categories)
+  unset IFS
+
+  for cat in "${target_list[@]}"; do
+    if ! wtc_is_safe_category "$cat"; then
+      echo "ERROR: unsafe category '${cat}' requested via --categories." >&2
+      echo "Only these categories may be applied: ${WTC_SAFE_CATEGORIES// /, }." >&2
+      exit 1
+    fi
+  done
+
+  # --- 4. Plan staleness check (warn-only). -------------------------------
+  generated_at="$(jq -r '.generated_at // empty' <<<"$plan_json")"
+  gen_epoch="$(wtc_epoch_from_iso8601 "$generated_at")"
+  if [[ "$gen_epoch" != "0" ]]; then
+    now_epoch="$(date -u +%s)"
+    age_seconds=$(( now_epoch - gen_epoch ))
+    if (( age_seconds > 3600 )); then
+      echo "WARNING: cached plan at '${cache_path}' is $(( age_seconds / 60 )) minutes old (generated_at=${generated_at})." >&2
+      echo "Proceeding anyway -- per-entry sha/dirty drift is re-verified immediately before each removal. Consider re-scanning for a fresher plan." >&2
+    fi
+  fi
+
+  # --- 5. Filter entries to target categories; hard-exclude dirty_skipped. -
+  # The dirty_skipped exclusion below is defense-in-depth: step 3's
+  # validation already makes it unreachable for dirty_skipped to appear in
+  # $target_list, but the exclusion is kept explicit and visible rather
+  # than relying solely on that validation.
+  filtered_entries="$(jq -c --arg cats "$target_categories" '
+    ($cats | split(",")) as $catlist
+    | [.entries[] | select(.category as $c | ($catlist | index($c)) != null)]
+    | map(select(.category != "dirty_skipped"))
+  ' <<<"$plan_json")"
+
+  # --- 6. Per-entry drift guard + removal, sequentially. ------------------
+  summary_results=()
+
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+
+    branch="$(jq -r '.branch' <<<"$entry")"
+    path="$(jq -r '.path' <<<"$entry")"
+    recorded_sha="$(jq -r '.sha' <<<"$entry")"
+    category="$(jq -r '.category' <<<"$entry")"
+
+    # 6a. sha drift: plain local read, no gh, no wt list, no re-categorization.
+    current_sha="$(git -C "$path" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$current_sha" != "$recorded_sha" ]]; then
+      summary_results+=("$(jq -c -n \
+        --arg branch "$branch" --arg category "$category" \
+        '{branch: $branch, category: $category, outcome: "skipped_drift", reason: "sha changed since scan"}')")
+      continue
+    fi
+
+    # 6b. dirty drift: plain local read.
+    porcelain="$(git -C "$path" status --porcelain 2>/dev/null || true)"
+    if [[ -n "$porcelain" ]]; then
+      summary_results+=("$(jq -c -n \
+        --arg branch "$branch" --arg category "$category" \
+        '{branch: $branch, category: $category, outcome: "skipped_drift", reason: "became dirty since scan"}')")
+      continue
+    fi
+
+    # 6c. both checks passed -- remove.
+    remove_result="$(wtc_wt_remove "$branch")"
+    outcome="$(jq -r '.outcome' <<<"$remove_result")"
+
+    if [[ "$outcome" == "failed" ]]; then
+      any_failed=true
+      detail="$(jq -r '.detail // empty' <<<"$remove_result")"
+      summary_results+=("$(jq -c -n \
+        --arg branch "$branch" --arg category "$category" --arg detail "$detail" \
+        '{branch: $branch, category: $category, outcome: "failed", reason: $detail}')")
+    else
+      summary_results+=("$(jq -c -n \
+        --arg branch "$branch" --arg category "$category" --arg outcome "$outcome" \
+        '{branch: $branch, category: $category, outcome: $outcome}')")
+    fi
+  done <<<"$(jq -c '.[]' <<<"$filtered_entries")"
+
+  # --- 7. Final summary. ---------------------------------------------------
+  if (( ${#summary_results[@]} > 0 )); then
+    printf '%s\n' "${summary_results[@]}" | wtc_print_apply_summary
+  else
+    printf '' | wtc_print_apply_summary
+  fi
+
+  # --- 8. Exit non-zero iff any entry failed. -------------------------------
+  if [[ "$any_failed" == "true" ]]; then
+    return 1
+  fi
+  return 0
 }
 
 cmd_debug_context() {
