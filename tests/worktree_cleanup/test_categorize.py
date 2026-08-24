@@ -49,9 +49,17 @@ def _run_git(path: Path, *args: str) -> str:
 
 
 def _init_git_repo(path: Path) -> str:
-    """Inits a repo with one commit and returns its sha."""
+    """Inits a repo with one commit and returns its sha.
+
+    Forces the initial branch name to something that is never "main" (or
+    any other plausible default), regardless of the ambient
+    `init.defaultBranch` config -- so no_pr/empty-detection tests (Task 8)
+    that check ancestry against a "default_branch" name never accidentally
+    pass just because this repo's own default branch happens to be named
+    the same thing.
+    """
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "init", "-q", "-b", "wtc-test-initial"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
     (path / "README.md").write_text("hello\n")
@@ -256,7 +264,12 @@ def test_closed_pr_equal_tip_is_safe(tmp_path, run_script, fake_bins):
     assert by_branch["feature"]["category"] == "closed"
 
 
-def test_no_pr_hands_off_to_task8_placeholder(tmp_path, run_script, fake_bins):
+def test_no_pr_singleton_is_needs_review(tmp_path, run_script, fake_bins):
+    """A no-PR branch with a unique sha (not an ancestor of the default
+    branch, and sharing its sha with no other no-PR branch) lands on
+    Task 8's no-PR ladder as a "needs_review" singleton -- never a safe
+    category, since there's no PR to cross-check position against.
+    """
     repo = tmp_path / "wt"
     sha = _init_git_repo(repo)
 
@@ -269,7 +282,8 @@ def test_no_pr_hands_off_to_task8_placeholder(tmp_path, run_script, fake_bins):
         run_script, fake_bins, [_wt_entry("feature", repo, sha)]
     )
 
-    assert by_branch["feature"]["category"] == "no_pr_pending"
+    assert by_branch["feature"]["category"] == "needs_review"
+    assert "reason" not in by_branch["feature"]
 
 
 def test_gh_failure_is_error_category(tmp_path, run_script, fake_bins):

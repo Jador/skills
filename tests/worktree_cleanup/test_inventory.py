@@ -341,10 +341,11 @@ def test_text_format_reports_category_and_dirty_override(
 ):
     """cmd_scan's text report now surfaces the categorization ladder's
     output (Task 7) rather than the raw dirty/ignored fields directly:
-    a no-PR, clean worktree reports the Task 8 extension-point placeholder
-    category, and a no-PR but dirty worktree is forced to "dirty_skipped"
-    by the dirty override -- regardless of what the (no-PR) ladder would
-    otherwise have produced.
+    a no-PR, clean worktree with a unique (fabricated, non-ancestor) sha
+    reports "needs_review" (Task 8's no-PR singleton case), and a no-PR
+    but dirty worktree is forced to "dirty_skipped" by the dirty override
+    -- regardless of what the (no-PR) ladder would otherwise have
+    produced.
     """
     entries = _entries(worktree_paths)
     fake_bins.set_responses(
@@ -369,4 +370,4 @@ def test_text_format_reports_category_and_dirty_override(
     assert "untracked-branch" in result.stdout
     assert "category=dirty_skipped" in result.stdout
     assert "clean-branch" in result.stdout
-    assert "category=no_pr_pending" in result.stdout
+    assert "category=needs_review" in result.stdout

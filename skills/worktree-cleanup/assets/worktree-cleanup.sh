@@ -472,7 +472,16 @@ wtc_lookup_pr() {
 #                attached). Not safe -- a human should look before removing.
 #   (no_pr)   -- wtc_lookup_pr found no PR at all, ever, for this head
 #                branch. This ladder does not decide anything for that
-#                case itself -- see wtc_categorize_no_pr below.
+#                case itself -- see wtc_categorize_no_pr and
+#                wtc_compute_no_pr_categories below (Task 8):
+#     empty      -- the branch's HEAD sha is an ancestor of (or equal to)
+#                   the default branch -- zero unique commits. Safe.
+#     duplicate  -- among no-PR/non-empty branches, >1 share the exact
+#                   same HEAD sha; all but the most-recently-touched one
+#                   in that group. Safe.
+#     needs_review -- either the most-recently-touched branch in a
+#                   duplicate-sha group, or a singleton (unique sha,
+#                   not an ancestor of default). Never auto-removed.
 #
 # Dirty override (applied last, unconditionally): if the entry's `dirty`
 # flag is true, the category above is discarded and replaced with
@@ -546,29 +555,142 @@ wtc_ladder_pr_category() {
   esac
 }
 
-# wtc_categorize_no_pr <entry_json>
+# wtc_dir_mtime <path>
 #
-# Extension point for Task 8. Called whenever wtc_lookup_pr returns
-# {"category":"no_pr"} for a branch -- i.e. no PR, of any state, has ever
-# matched this head branch. This ladder (Task 7) deliberately does not
-# decide empty/duplicate/etc. for that case; Task 8 replaces this stub's
-# body with that detection.
-#
-# Contract for Task 8: receives the full normalized inventory entry
-# (branch, path, sha, dirty, staged/modified/untracked/renamed/deleted,
-# ignored_count) as a single JSON object in $1, and must print exactly one
-# compact JSON object on stdout carrying at least a "category" key,
-# consistent with the shapes wtc_categorize_entry merges onto the entry
-# below (e.g. {"category":"empty"} or {"category":"duplicate","reason":
-# "..."}). Until Task 8 lands, this returns a clearly-provisional
-# placeholder category ("no_pr_pending") rather than guessing -- so scan
-# output never silently mislabels a no-PR branch as safe or unsafe.
-wtc_categorize_no_pr() {
-  local entry_json="$1"
-  echo '{"category":"no_pr_pending"}'
+# "Most-recently-touched" signal for duplicate-sha grouping below: prints
+# the worktree directory's own mtime (epoch seconds). Deliberately NOT the
+# commit's timestamp -- by construction every branch in a duplicate-sha
+# group shares the exact same HEAD commit, so the commit's author/committer
+# date is identical across the whole group and can't distinguish them.
+# Directory mtime is a cheap, good-enough proxy for "which of these
+# worktrees was created/touched most recently" (git bumps a directory's
+# mtime on checkout/file changes within it); it's not perfect (e.g. an
+# unrelated `touch` inside the worktree would perturb it) but this whole
+# pattern is based on a single observed occurrence (a 17-branch fanned-out
+# agent run collapsing to 2 distinct commits) -- see the plan notes -- so
+# it isn't worth a more elaborate signal. Never fails the caller: a
+# missing/unreadable path yields 0 (bash 3.2 / macOS system `stat`, hence
+# `-f %m` rather than GNU `-c %Y`; a `-c %Y` fallback is included in case
+# this ever runs under a Linux `stat`).
+wtc_dir_mtime() {
+  local path="$1" mtime
+  mtime="$(stat -f %m "$path" 2>/dev/null || stat -c %Y "$path" 2>/dev/null || true)"
+  echo "${mtime:-0}"
 }
 
-# wtc_categorize_entry <entry_json> <repo_slug>
+# wtc_compute_no_pr_categories <no_pr_entries_json_array> <default_branch>
+#
+# The multi-entry half of Task 8's detection: decides empty/duplicate/
+# needs_review for a *batch* of no-PR entries at once (duplicate-sha
+# grouping is inherently cross-entry -- it needs to see every no-PR
+# branch's HEAD sha together to find the groups), then hands each entry's
+# per-branch verdict to wtc_categorize_no_pr as a precomputed map so that
+# function can stay a simple per-entry lookup (see its header comment for
+# why this split, rather than doing the grouping inside the per-entry
+# function itself).
+#
+# For each input entry (each has at least branch/path/sha):
+#   1. empty: `git -C <path> merge-base --is-ancestor <sha> <default_branch>`
+#      succeeds -- the branch's HEAD has zero commits beyond the default
+#      branch's tip.
+#   2. Otherwise, group the remaining entries by HEAD sha. A group of 1
+#      (a "singleton") -> needs_review, no reason. A group of >1 (a
+#      "duplicate-sha group") -> the entry with the greatest
+#      wtc_dir_mtime (ties broken alphabetically by branch, for
+#      determinism) -> needs_review with a reason citing the group; every
+#      other entry in the group -> duplicate with a reason naming the kept
+#      branch.
+#
+# Prints a single compact JSON object mapping branch -> {"category":...,
+# "reason":...?} for every input entry. Prints "{}" for an empty input
+# array.
+wtc_compute_no_pr_categories() {
+  local entries_json="$1" default_branch="$2"
+  local line branch path sha is_ancestor mtime row
+  local -a rows
+
+  rows=()
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    branch="$(jq -r '.branch' <<<"$line")"
+    path="$(jq -r '.path' <<<"$line")"
+    sha="$(jq -r '.sha' <<<"$line")"
+
+    if git -C "$path" merge-base --is-ancestor "$sha" "$default_branch" 2>/dev/null; then
+      is_ancestor=true
+    else
+      is_ancestor=false
+    fi
+    mtime="$(wtc_dir_mtime "$path")"
+
+    row="$(jq -c -n --arg branch "$branch" --arg sha "$sha" \
+      --argjson is_ancestor "$is_ancestor" --argjson mtime "$mtime" \
+      '{branch: $branch, sha: $sha, is_ancestor: $is_ancestor, mtime: $mtime}')"
+    rows+=("$row")
+  done <<<"$(jq -c '.[]' <<<"$entries_json")"
+
+  if (( ${#rows[@]} == 0 )); then
+    echo '{}'
+    return 0
+  fi
+
+  printf '%s\n' "${rows[@]}" | jq -s -c '
+    (map(select(.is_ancestor)) | reduce .[] as $e ({}; . + {($e.branch): {category: "empty"}})) as $empty_map
+    | (map(select(.is_ancestor | not))) as $candidates
+    | ($candidates
+        | group_by(.sha)
+        | reduce .[] as $group ({};
+            if ($group | length) == 1 then
+              . + {($group[0].branch): {category: "needs_review"}}
+            else
+              ($group | sort_by([-.mtime, .branch])) as $sorted
+              | ($sorted[0].branch) as $kept
+              | ($sorted[1:] | map(.branch)) as $dups
+              | ($sorted | length) as $n
+              | . + {($kept): {category: "needs_review",
+                      reason: ("kept as most-recently-touched of " + ($n|tostring)
+                        + " branches sharing this HEAD commit (others: " + ($dups | join(", ")) + ").")}}
+                + (reduce $dups[] as $d ({}; . + {($d): {category: "duplicate",
+                      reason: ("duplicate HEAD commit shared with " + (($n - 1)|tostring)
+                        + " other branch(es); " + $kept + " kept as most-recently-touched.")}}))
+            end
+          )
+      ) as $dup_map
+    | $empty_map + $dup_map
+  '
+}
+
+# wtc_categorize_no_pr <entry_json> <no_pr_map_json>
+#
+# Called whenever wtc_lookup_pr returns {"category":"no_pr"} for a branch
+# -- i.e. no PR, of any state, has ever matched this head branch. This
+# ladder (Task 7) deliberately does not decide empty/duplicate/etc.
+# itself, because duplicate-sha grouping is inherently a multi-entry
+# operation (see wtc_compute_no_pr_categories above) while this function
+# is invoked per-entry from wtc_categorize_entry. Rather than re-deriving
+# the group from scratch per entry, the caller (wtc_categorize_all) runs
+# wtc_compute_no_pr_categories once over every no-PR entry up front and
+# threads the resulting branch -> verdict map through wtc_categorize_entry
+# into here -- this function only has to do the lookup.
+#
+# $1 is the full normalized inventory entry (branch, path, sha, dirty,
+# staged/modified/untracked/renamed/deleted, ignored_count) as a single
+# JSON object, matching wtc_categorize_entry's other callees. $2 is the
+# precomputed map produced by wtc_compute_no_pr_categories. Prints exactly
+# one compact JSON object on stdout carrying at least a "category" key
+# (e.g. {"category":"empty"} or {"category":"duplicate","reason":"..."}),
+# consistent with the shapes wtc_categorize_entry merges onto the entry.
+# Falls back to a bare "needs_review" (never "safe" to apply) if the
+# branch is somehow missing from the map -- defensive only, should be
+# unreachable since wtc_categorize_all builds the map from the exact same
+# no-PR entries it calls this function for.
+wtc_categorize_no_pr() {
+  local entry_json="$1" no_pr_map_json="$2" branch
+  branch="$(jq -r '.branch' <<<"$entry_json")"
+  jq -c --arg branch "$branch" '.[$branch] // {category: "needs_review"}' <<<"$no_pr_map_json"
+}
+
+# wtc_categorize_entry <entry_json> <repo_slug> <no_pr_map_json>
 #
 # Runs the full ladder (including the dirty override) for one normalized
 # inventory entry (as produced by wtc_inventory) and prints the entry with
@@ -576,8 +698,12 @@ wtc_categorize_no_pr() {
 # "reason" (needs_review, dirty_skipped) and/or "pr_number"/"pr_title"/
 # "pr_url" (whenever a PR was selected, so reports can cite it) when
 # applicable.
+#
+# <no_pr_map_json> is the precomputed branch -> verdict map from
+# wtc_compute_no_pr_categories (see wtc_categorize_all below), forwarded
+# unchanged to wtc_categorize_no_pr whenever this entry has no PR.
 wtc_categorize_entry() {
-  local entry_json="$1" repo_slug="$2"
+  local entry_json="$1" repo_slug="$2" no_pr_map_json="$3"
   local branch path sha dirty lookup lookup_category state remote_sha ladder
 
   branch="$(jq -r '.branch' <<<"$entry_json")"
@@ -591,7 +717,7 @@ wtc_categorize_entry() {
   if [[ "$lookup_category" == "error" ]]; then
     ladder='{"category":"error"}'
   elif [[ "$lookup_category" == "no_pr" ]]; then
-    ladder="$(wtc_categorize_no_pr "$entry_json")"
+    ladder="$(wtc_categorize_no_pr "$entry_json" "$no_pr_map_json")"
   else
     state="$(jq -r '.state' <<<"$lookup" | tr '[:upper:]' '[:lower:]')"
     case "$state" in
@@ -622,22 +748,54 @@ wtc_categorize_entry() {
   jq -c --argjson base "$ladder" '. + $base' <<<"$entry_json"
 }
 
-# wtc_categorize_all <inventory_json_array> <repo_slug>
+# wtc_categorize_all <inventory_json_array> <repo_slug> <default_branch>
 #
 # Runs wtc_categorize_entry over every entry in an inventory array (as
 # produced by wtc_inventory) and prints the categorized result as a single
 # JSON array. A bash loop (not a pure jq map) because wtc_categorize_entry
 # calls wtc_lookup_pr, which mutates the module-level PR cache and shells
 # out to git/gh per entry.
+#
+# Before that per-entry pass, runs a first pass over the same inventory to
+# find every entry whose wtc_lookup_pr result is "no_pr" (a cheap,
+# cache-only re-check -- wtc_lookup_pr already memoized the branch ->
+# lookup result on the first call in this run, so this never triggers a
+# second `gh` invocation per branch) and feeds that batch to
+# wtc_compute_no_pr_categories once, up front. This is the resolution to
+# Task 8's core wrinkle: duplicate-sha grouping needs to see every no-PR
+# entry at once, but wtc_categorize_entry's loop below processes entries
+# one at a time -- so the multi-entry grouping decision is made here, in a
+# single pass, and handed into the per-entry pass as a precomputed map
+# (see wtc_categorize_no_pr's header comment) rather than trying to make
+# wtc_categorize_no_pr re-derive its sibling group per call.
 wtc_categorize_all() {
-  local inventory_json="$1" repo_slug="$2"
-  local line result
-  local -a results
+  local inventory_json="$1" repo_slug="$2" default_branch="$3"
+  local line branch lookup lookup_category result no_pr_map_json
+  local -a no_pr_entries results
+
+  no_pr_entries=()
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    branch="$(jq -r '.branch' <<<"$line")"
+    lookup="$(wtc_lookup_pr "$branch" "$repo_slug")"
+    lookup_category="$(jq -r '.category' <<<"$lookup")"
+    if [[ "$lookup_category" == "no_pr" ]]; then
+      no_pr_entries+=("$line")
+    fi
+  done <<<"$(jq -c '.[]' <<<"$inventory_json")"
+
+  if (( ${#no_pr_entries[@]} > 0 )); then
+    no_pr_map_json="$(wtc_compute_no_pr_categories \
+      "$(printf '%s\n' "${no_pr_entries[@]}" | jq -s -c '.')" \
+      "$default_branch")"
+  else
+    no_pr_map_json="{}"
+  fi
 
   results=()
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
-    result="$(wtc_categorize_entry "$line" "$repo_slug")"
+    result="$(wtc_categorize_entry "$line" "$repo_slug" "$no_pr_map_json")"
     results+=("$result")
   done <<<"$(jq -c '.[]' <<<"$inventory_json")"
 
@@ -651,10 +809,8 @@ wtc_categorize_all() {
 # ---------------------------------------------------------------------------
 # Command stubs — the plan-cache/apply path lands in a later task.
 # cmd_scan wires up repo-context detection (Task 4), the inventory (Task
-# 5), and the categorization ladder (Task 7, above) -- it does not yet
-# write the plan to the cache path. Task 8 still owes wtc_categorize_no_pr
-# (above) its real empty/duplicate detection; until then no-PR branches
-# report the provisional "no_pr_pending" category (never "safe" to apply).
+# 5), and the categorization ladder (Tasks 7-8, above) -- it does not yet
+# write the plan to the cache path.
 # ---------------------------------------------------------------------------
 
 cmd_scan() {
@@ -663,7 +819,7 @@ cmd_scan() {
   default_branch="$(detect_default_branch)"
   cache_path="$(plan_cache_path)"
   inventory="$(wtc_inventory)"
-  categorized="$(wtc_categorize_all "$inventory" "$repo_slug")"
+  categorized="$(wtc_categorize_all "$inventory" "$repo_slug" "$default_branch")"
 
   # TODO(later task): write ${categorized} to ${cache_path} as the cached
   # plan for --apply to load. Until then, --format=json surfaces the
@@ -721,9 +877,10 @@ cmd_debug_categorize() {
   # step). Unlike cmd_scan, this bypasses --format entirely -- always one
   # compact JSON object per line, never an array -- to keep ad-hoc/test
   # assertions on individual entries simple.
-  local repo_slug categorized
+  local repo_slug default_branch categorized
   repo_slug="$(detect_repo_slug)"
-  categorized="$(wtc_categorize_all "$(wtc_inventory)" "$repo_slug")"
+  default_branch="$(detect_default_branch)"
+  categorized="$(wtc_categorize_all "$(wtc_inventory)" "$repo_slug" "$default_branch")"
   printf '%s\n' "$categorized" | jq -c '.[]'
 }
 
