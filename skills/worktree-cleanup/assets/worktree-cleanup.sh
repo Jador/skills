@@ -807,10 +807,62 @@ wtc_categorize_all() {
 }
 
 # ---------------------------------------------------------------------------
-# Command stubs — the plan-cache/apply path lands in a later task.
-# cmd_scan wires up repo-context detection (Task 4), the inventory (Task
-# 5), and the categorization ladder (Tasks 7-8, above) -- it does not yet
-# write the plan to the cache path.
+# Plan cache write (Task 9) — assembles the final plan JSON (metadata plus
+# categorized entries[]) and writes it atomically to the Task 4 cache path:
+# write to a sibling temp file, then `mv` it into place, so a reader (the
+# later --apply path, or a concurrent scan) never observes a partially
+# written cache file.
+# ---------------------------------------------------------------------------
+
+# wtc_now
+#
+# Prints the plan's `generated_at` timestamp: honors WTC_NOW (an injectable
+# override, e.g. for deterministic tests) when set and non-empty; otherwise
+# the current UTC time as ISO 8601 (`date -u +%Y-%m-%dT%H:%M:%SZ`).
+wtc_now() {
+  if [[ -n "${WTC_NOW:-}" ]]; then
+    printf '%s' "$WTC_NOW"
+  else
+    date -u +%Y-%m-%dT%H:%M:%SZ
+  fi
+}
+
+# wtc_write_plan_cache <categorized_entries_json_array> <repo_slug> <default_branch> <cache_path>
+#
+# Assembles the plan JSON --
+#   {"generated_at":..., "repo":..., "default_branch":..., "entries":[...]}
+# -- and writes it atomically to <cache_path>: first to a temp file created
+# via `mktemp` in the *same directory* as <cache_path> (atomic `mv` requires
+# same filesystem), then `mv`'d over the final path. The temp file is
+# cleaned up if the write to it fails, so no stray temp file is ever left
+# behind on either the success or failure path.
+wtc_write_plan_cache() {
+  local categorized_json="$1" repo_slug="$2" default_branch="$3" cache_path="$4"
+  local cache_dir tmp_file plan_json
+
+  cache_dir="$(dirname "$cache_path")"
+  tmp_file="$(mktemp "${cache_dir}/.worktree-cleanup-plan.XXXXXX")"
+
+  plan_json="$(jq -c -n \
+    --arg generated_at "$(wtc_now)" \
+    --arg repo "$repo_slug" \
+    --arg default_branch "$default_branch" \
+    --argjson entries "$categorized_json" \
+    '{generated_at: $generated_at, repo: $repo, default_branch: $default_branch, entries: $entries}')"
+
+  if ! printf '%s\n' "$plan_json" > "$tmp_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+
+  mv "$tmp_file" "$cache_path"
+}
+
+# ---------------------------------------------------------------------------
+# Commands — cmd_scan wires up repo-context detection (Task 4), the
+# inventory (Task 5), the categorization ladder (Tasks 7-8), and the plan
+# cache write (Task 9, above). cmd_apply's load-and-remove path lands in a
+# later task.
 # ---------------------------------------------------------------------------
 
 cmd_scan() {
@@ -821,10 +873,8 @@ cmd_scan() {
   inventory="$(wtc_inventory)"
   categorized="$(wtc_categorize_all "$inventory" "$repo_slug" "$default_branch")"
 
-  # TODO(later task): write ${categorized} to ${cache_path} as the cached
-  # plan for --apply to load. Until then, --format=json surfaces the
-  # categorized entries directly, and the text report is a per-worktree
-  # summary.
+  wtc_write_plan_cache "$categorized" "$repo_slug" "$default_branch" "$cache_path"
+
   if [[ "$FORMAT" == "json" ]]; then
     printf '%s\n' "$categorized"
   else
