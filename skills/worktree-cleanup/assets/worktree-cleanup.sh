@@ -78,6 +78,7 @@ FORMAT="text"
 APPLY=false
 CATEGORIES=""
 PLAN_PATH=""
+DEBUG_CONTEXT=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -99,6 +100,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --plan=*)
       PLAN_PATH="${1#--plan=}"
+      shift
+      ;;
+    --debug-context)
+      # Internal/debug hook, intentionally undocumented in `--help`: prints
+      # the resolved owner/repo, default branch, and plan cache path, then
+      # exits. Used to verify repo-context detection independently of the
+      # scan/apply flows (e.g. across worktrees of the same repo).
+      DEBUG_CONTEXT=true
       shift
       ;;
     *)
@@ -147,29 +156,88 @@ check_prereqs() {
 check_prereqs
 
 # ---------------------------------------------------------------------------
-# Command stubs — inventory/categorization/plan-cache logic and the apply
-# path land in later tasks. This task only wires up the skeleton so those
-# tasks have a place to hook in.
+# Repo context detection — owner/repo, default branch, and the plan cache
+# path. Operates on the repo containing the current working directory.
+# ---------------------------------------------------------------------------
+
+detect_repo_slug() {
+  # Detects "owner/repo" via `gh repo view`. On failure (not a GitHub repo,
+  # gh not authenticated, no network, etc.), fails with a clear message
+  # naming the command that failed and gh's own error output.
+  local slug
+  if ! slug="$("$GH_BIN" repo view --json nameWithOwner --jq .nameWithOwner 2>&1)"; then
+    echo "ERROR: failed to detect GitHub repo via '${GH_BIN} repo view --json nameWithOwner --jq .nameWithOwner':" >&2
+    echo "  ${slug}" >&2
+    exit 1
+  fi
+  echo "$slug"
+}
+
+detect_default_branch() {
+  # Parses `refs/remotes/origin/HEAD` for the default branch name, falling
+  # back to "main" when the symbolic ref isn't set (e.g. a fresh clone with
+  # `git clone --single-branch`, or no `origin` remote at all).
+  local ref
+  if ref="$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)"; then
+    echo "${ref#refs/remotes/origin/}"
+  else
+    echo "main"
+  fi
+}
+
+plan_cache_path() {
+  # Resolves the plan cache path from `--git-common-dir`, NOT `--git-dir`.
+  # `--git-dir` resolves per-worktree (`<repo>/.git/worktrees/<name>`), which
+  # would break scan-here/apply-there across worktrees of the same repo.
+  # `--git-common-dir` resolves to the same absolute path from every
+  # worktree of a given repo (verified empirically in Task 4).
+  local common_dir
+  common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+  echo "${common_dir}/worktree-cleanup-plan.json"
+}
+
+# ---------------------------------------------------------------------------
+# Command stubs — inventory/categorization logic and the apply path land in
+# later tasks. This task only wires repo-context detection up ahead of
+# those stubs so those tasks have resolved values to hook in.
 # ---------------------------------------------------------------------------
 
 cmd_scan() {
+  local repo_slug default_branch cache_path
+  repo_slug="$(detect_repo_slug)"
+  default_branch="$(detect_default_branch)"
+  cache_path="$(plan_cache_path)"
+
   # TODO(later task): inventory worktrees via `${WT_BIN} list --format=json`,
   # cross-check GitHub PR status via `${GH_BIN}`, categorize each worktree,
-  # write the plan to the cache path, then print the report in $FORMAT.
-  echo "TODO: scan not yet implemented (format=${FORMAT})" >&2
+  # write the plan to ${cache_path}, then print the report in $FORMAT.
+  echo "TODO: scan not yet implemented (format=${FORMAT}, repo=${repo_slug}, default_branch=${default_branch}, cache=${cache_path})" >&2
   return 1
 }
 
 cmd_apply() {
-  # TODO(later task): load the cached plan (or $PLAN_PATH if set), filter to
+  local cache_path
+  cache_path="${PLAN_PATH:-$(plan_cache_path)}"
+
+  # TODO(later task): load the cached plan from ${cache_path}, filter to
   # $CATEGORIES, and remove each via
   # `${WT_BIN} remove --no-delete-branch <worktree>`.
-  echo "TODO: apply not yet implemented (categories=${CATEGORIES:-<all>}, plan=${PLAN_PATH:-<cached>})" >&2
+  echo "TODO: apply not yet implemented (categories=${CATEGORIES:-<all>}, plan=${cache_path})" >&2
   return 1
 }
 
+cmd_debug_context() {
+  # Internal/debug hook for --debug-context: prints resolved repo context
+  # so it can be verified directly (see: Task 4 verification step).
+  echo "repo_slug=$(detect_repo_slug)"
+  echo "default_branch=$(detect_default_branch)"
+  echo "plan_cache_path=$(plan_cache_path)"
+}
+
 main() {
-  if [[ "$APPLY" == "true" ]]; then
+  if [[ "$DEBUG_CONTEXT" == "true" ]]; then
+    cmd_debug_context
+  elif [[ "$APPLY" == "true" ]]; then
     cmd_apply
   else
     cmd_scan
