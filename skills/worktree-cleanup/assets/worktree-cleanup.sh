@@ -715,7 +715,7 @@ wtc_categorize_entry() {
   lookup_category="$(jq -r '.category' <<<"$lookup")"
 
   if [[ "$lookup_category" == "error" ]]; then
-    ladder='{"category":"error"}'
+    ladder='{"category":"error","reason":"PR lookup failed (the '"'"'gh pr list'"'"' call for this branch exited non-zero)."}'
   elif [[ "$lookup_category" == "no_pr" ]]; then
     ladder="$(wtc_categorize_no_pr "$entry_json" "$no_pr_map_json")"
   else
@@ -870,10 +870,93 @@ wtc_write_plan_cache() {
 }
 
 # ---------------------------------------------------------------------------
+# Human-readable text report (Task 10) — renders the categorized entries as
+# a plain-text report for the default (`--format=text`) scan output. The
+# JSON output path (`--format=json`, in cmd_scan below) is untouched by
+# this: it always prints the raw categorized array.
+#
+# Section order: safe categories first (merged, closed, empty, duplicate --
+# these are the categories `--apply` can remove), then the non-safe/
+# informational categories (open, needs_review, dirty_skipped, error).
+# Within each group, categories are listed in that fixed order. A category
+# with zero entries in this scan is omitted entirely -- no
+# "Empty (0):" header ever prints.
+#
+# Each entry line is "  <branch>", plus " (<N> ignored file[s])" appended
+# only when that entry's ignored_count is non-zero, plus " -- <reason>"
+# appended whenever the entry carries a reason (in practice: needs_review,
+# dirty_skipped, and error entries that populate one; safe/open entries
+# normally don't carry a reason at all).
+#
+# Closing line: names the plan cache path and a copy-pasteable next
+# `--apply --categories=...` command, restricted to whichever safe
+# categories actually have at least one entry in this scan (a category
+# with zero entries is dropped from the suggested command, same as it's
+# dropped from the report body).
+# ---------------------------------------------------------------------------
+
+# wtc_render_text_report <categorized_entries_json_array> <cache_path>
+wtc_render_text_report() {
+  local categorized_json="$1" cache_path="$2"
+  local body summary safe_total safe_present
+
+  if [[ "$(jq 'length' <<<"$categorized_json")" -eq 0 ]]; then
+    echo "No worktrees to report (only the main/current worktree exists)."
+    echo "Plan cached at: ${cache_path}"
+    return 0
+  fi
+
+  body="$(jq -r '
+    def cat_label($cat):
+      {
+        merged: "Merged",
+        closed: "Closed",
+        empty: "Empty",
+        duplicate: "Duplicate",
+        open: "Open",
+        needs_review: "Needs Review",
+        dirty_skipped: "Dirty (skipped)",
+        error: "Error"
+      }[$cat];
+    def entry_line:
+      (if ((.ignored_count // 0) > 0) then
+         " (\(.ignored_count) ignored file" + (if .ignored_count == 1 then "" else "s" end) + ")"
+       else "" end) as $ignored
+      | (if ((.reason // "") != "") then " -- \(.reason)" else "" end) as $reason
+      | "  " + .branch + $ignored + $reason;
+    . as $entries
+    | ["merged","closed","empty","duplicate","open","needs_review","dirty_skipped","error"][]
+    | . as $cat
+    | ($entries | map(select(.category == $cat))) as $group
+    | select(($group | length) > 0)
+    | ([cat_label($cat) + " (" + ($group | length | tostring) + "):"]
+        + ($group | map(entry_line)) + [""])
+    | .[]
+  ' <<<"$categorized_json")"
+
+  printf '%s\n' "$body"
+
+  summary="$(jq -r '
+    . as $entries
+    | ["merged","closed","empty","duplicate"] as $cats
+    | ($entries | map(select(.category as $c | $cats | index($c) != null)) | length) as $total
+    | ($cats | map(select(. as $c | ($entries | map(select(.category == $c)) | length) > 0)) | join(",")) as $present
+    | "\($total)\t\($present)"
+  ' <<<"$categorized_json")"
+  IFS=$'\t' read -r safe_total safe_present <<<"$summary"
+
+  if [[ -n "$safe_present" ]]; then
+    echo "Run '${SCRIPT_NAME} --apply --categories=${safe_present}' to remove the ${safe_total} safe worktree(s). Plan cached at: ${cache_path}"
+  else
+    echo "No safe worktrees to remove in this scan. Plan cached at: ${cache_path}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Commands — cmd_scan wires up repo-context detection (Task 4), the
-# inventory (Task 5), the categorization ladder (Tasks 7-8), and the plan
-# cache write (Task 9, above). cmd_apply's load-and-remove path lands in a
-# later task.
+# inventory (Task 5), the categorization ladder (Tasks 7-8), the plan
+# cache write (Task 9), and the text report renderer (Task 10, above).
+# cmd_apply's load-and-remove path lands in a later task.
 # ---------------------------------------------------------------------------
 
 # wtc_emit_scan_warnings <categorized_entries_json_array>
@@ -921,14 +1004,7 @@ cmd_scan() {
     # (e.g. the worktree-cleanup skill) can parse this line directly.
     printf '%s\n' "$plan_json"
   else
-    printf '%s\n' "$categorized" | jq -r '
-      if length == 0 then
-        "No worktrees to report (only the main/current worktree exists)."
-      else
-        .[] | "\(.branch)\t\(.path)\tcategory=\(.category)"
-          + (if .reason then "\treason=\(.reason)" else "" end)
-      end
-    '
+    wtc_render_text_report "$categorized" "$cache_path"
   fi
 }
 
