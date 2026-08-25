@@ -62,7 +62,7 @@ You never apply the fix yourself. You are read-only — you report the symbol an
 Report exactly four sections, in this order, each heading carrying a count:
 
 1. **`Files touched`** — the files the audit actually covered.
-2. **`Deletions`** — one entry per comment to remove. Fields: `file`, `line range`, verbatim comment text, `label` ∈ {`clear-cut`, `ambiguous`} (see the labeling rules above — plain narration/restated-code comments with no keep claim are always `clear-cut`; keep claims and constraint comments follow the three-outcome rule in **Ambiguous keep claims**).
+2. **`Deletions`** — one entry per comment to remove. Fields: `file`, `line range`, verbatim comment text, `label` ∈ {`clear-cut`, `ambiguous`} (see the labeling rules above — plain narration/restated-code comments with no keep claim are always `clear-cut`; keep claims and constraint comments follow the three-outcome rule in **Ambiguous keep claims**), `reason` (one line: for a plain posture failure, which condition it fails — restates code, narrates a step, etc.; for a keep claim, what your investigation found or failed to find). Never discard this — it's the only record of the work behind the call.
 3. **`MUST KILL`** — one entry per guilty symbol. Fields: `symbol`, `location`, `reason` (one line), `fix shape` ∈ {rename, extract, type, test, lint, fix}, and an optional `patches` field (the `file`/`line range` of the `Deletions` entry this symbol excuses, if any).
 4. **`Skipped`** — one entry per comment that survived. Fields: `location`, `exception` (which of the five exceptions applied).
 

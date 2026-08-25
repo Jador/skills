@@ -34,9 +34,10 @@ If the mode is ambiguous, ask.
 2. Intent = the idea; artifact = the plan.
 
 **Changeset mode:**
-1. Resolve the repo root (`git rev-parse --show-toplevel`).
-2. Build the diff: `git diff <base>..HEAD` plus uncommitted changes, where `<base>` is the PR base branch if a PR exists, else the default branch.
-3. Intent = the originating idea/plan (find via branch/slug if present); artifact = the diff. Do **not** read the keyed handoff at `<root>/.claude/handoffs/<branch>.md` yet — that is the cross-check pass. Derive `<branch>` using the **Derive the branch path** substep of `skills/handoff/SKILL.md`'s "Locate the Handoff File" (the pure derivation only — do not run that step's `mkdir`/exclude side effects).
+1. **Derive the diff scope** (the canonical derivation, referenced by other skills):
+   - Resolve the repo root (`git rev-parse --show-toplevel`).
+   - Build the diff: `git diff <base>..HEAD` plus uncommitted changes, where `<base>` is the PR base branch if a PR exists, else the default branch.
+2. Intent = the originating idea/plan (find via branch/slug if present); artifact = the diff. Do **not** read the keyed handoff at `<root>/.claude/handoffs/<branch>.md` yet — that is the cross-check pass. Derive `<branch>` using the **Derive the branch path** substep of `skills/handoff/SKILL.md`'s "Locate the Handoff File" (the pure derivation only — do not run that step's `mkdir`/exclude side effects).
 
 **Idea mode:**
 1. If the idea document was passed inline (from `jador:discuss`), use it directly — do not read from disk. Otherwise read `~/ideas/<slug>.md`.

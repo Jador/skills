@@ -21,7 +21,7 @@ You are the entry point that turns the comment auditor's read-only report into a
 
 If `$ARGUMENTS` names one or more paths, that file list is the scope, and the granularity is **whole-file** — the caller named these files explicitly, so review every comment in them.
 
-Otherwise, derive the changeset scope using items 1–2 of `skills/critique/SKILL.md`'s "### 2. Gather Inputs" → **Changeset mode** substep (repo-root resolution and diff construction) — the pure derivation only. Do not run that substep's item 3 (intent-gathering and handoff-deferral); this skill has no intent to gather and nothing to reconcile against a handoff. The granularity here is **hunk-adjacent** — only comments touching the changed hunks are in scope; a pre-existing comment elsewhere in a touched file is not, even though the file itself is part of the diff.
+Otherwise, derive the changeset scope using the **Derive the diff scope** substep of `skills/critique/SKILL.md`'s "### 2. Gather Inputs" → **Changeset mode** (the pure derivation only — repo-root resolution and diff construction). Do not run that section's item 2 (intent-gathering and handoff-deferral); this skill has no intent to gather and nothing to reconcile against a handoff. The granularity here is **hunk-adjacent** — only comments touching the changed hunks are in scope; a pre-existing comment elsewhere in a touched file is not, even though the file itself is part of the diff.
 
 ### 2. Run the Comment Auditor
 
@@ -52,7 +52,7 @@ An `ambiguous` entry is worth asking about because it's a genuine judgment call,
 
 For the second shape, always offer the cheapest in-scope encoding as one of the options — don't just offer a binary keep/delete.
 
-On approval of an encoding: apply the encoding **first**, then delete the comment. On decline (or a plain "delete"): delete the comment and record the constraint as an open item in the report — do not silently drop it.
+On approval of an encoding: apply the encoding **first**, then delete the comment. On decline (or a plain "delete"): delete the comment and record the constraint as an open item in the report — do not silently drop it. Give it a durable home beyond this session's scrollback: if a handoff exists for this branch (`<root>/.claude/handoffs/<branch>.md`), invoke `jador:handoff update` (Skill tool) to append the declined constraint as a delta. If no handoff exists — the common case when this skill runs standalone — the step 7 report is the only record; make its entry specific enough (file, location, the constraint's text) that the user can act on it later without re-deriving it.
 
 ### 5. Fix the MUST KILL Symbols
 
