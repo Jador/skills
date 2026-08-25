@@ -2,7 +2,7 @@
 name: skill-builder
 description: Scaffold new Claude Code skills through structured conversation. Discusses the user's intent, fetches official docs, infers conventions from existing skills, and generates complete skill files — SKILL.md, assets, data directories — ready to use.
 argument-hint: "[description of the skill to build]"
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Skill Builder Skill
