@@ -194,13 +194,18 @@ def fake_bins(tmp_path: Path) -> FakeBins:
 def run_script(script_path: Path):
     """Returns a callable that runs worktree-cleanup.sh via subprocess.
 
-    Usage: ``run_script(["--format=json"], env={...})``. ``env`` (if
-    given) is merged onto a copy of the real process environment — so
-    PATH, HOME, etc. stay intact — rather than replacing it outright.
+    Usage: ``run_script(["--format=json"], env={...}, cwd=some_path)``.
+    ``env`` (if given) is merged onto a copy of the real process
+    environment — so PATH, HOME, etc. stay intact — rather than replacing
+    it outright. ``cwd`` (if given) sets the subprocess's working
+    directory — needed for ``--apply`` tests, since the drift guard's
+    provenance/self-targeting checks (``git worktree list``,
+    ``git rev-parse --show-toplevel``) resolve relative to the script's
+    own cwd, not any path recorded in the plan.
     """
 
     def _run(
-        args: Sequence[str], env: dict | None = None
+        args: Sequence[str], env: dict | None = None, cwd: Path | None = None
     ) -> subprocess.CompletedProcess:
         full_env = os.environ.copy()
         if env:
@@ -208,6 +213,7 @@ def run_script(script_path: Path):
         return subprocess.run(
             ["bash", str(script_path), *args],
             env=full_env,
+            cwd=str(cwd) if cwd is not None else None,
             capture_output=True,
             text=True,
         )

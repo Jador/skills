@@ -114,7 +114,11 @@ def test_nonzero_gh_exit_yields_error_not_no_pr(run_script, fake_bins):
 
     (result,) = _run_lookup(run_script, fake_bins, ["broken-branch"])
 
-    assert result == {"category": "error"}
+    # The error result carries gh's own stderr text as "reason" (rather
+    # than discarding it) so a caller can report *why* the lookup failed,
+    # not just that it did.
+    assert result["category"] == "error"
+    assert result["reason"] == "gh: some API failure"
 
 
 def test_empty_pr_list_yields_no_pr(run_script, fake_bins):

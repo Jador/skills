@@ -45,13 +45,15 @@ This scans every worktree, categorizes each one, and atomically writes the resul
       "reason": "...",
       "pr_number": 123,
       "pr_title": "...",
-      "pr_url": "https://..."
+      "pr_url": "https://...",
+      "original_category": "open",
+      "original_reason": "..."
     }
   ]
 }
 ```
 
-`reason`, `pr_number`, `pr_title`, and `pr_url` are present only on entries where they apply (e.g. `reason` on `needs_review`/`dirty_skipped`/`error`; the `pr_*` fields on any entry a PR was matched to). If stderr is non-empty, note its content — it names branches whose `gh pr list` lookup failed (categorized `error`) so you can call them out in the report.
+`reason`, `pr_number`, `pr_title`, and `pr_url` are present only on entries where they apply (e.g. `reason` on `needs_review`/`dirty_skipped`/`error`; the `pr_*` fields on any entry a PR was matched to). `original_category`/`original_reason` appear only on a `dirty_skipped` entry whose dirty override actually superseded a more specific category — e.g. a dirty worktree with an open PR keeps its `pr_*` fields and reports `original_category: "open"`, and a dirty worktree whose PR lookup itself failed reports `original_category: "error"`. When presenting the report, mention this: a dirty worktree with `original_category: "open"` is active work that's also dirty, not just clutter. If stderr is non-empty, note its content — it names branches whose `gh pr list` lookup failed so you can call them out in the report (check both `category == "error"` and `original_category == "error"`, since a dirty+lookup-failure entry reports `category: "dirty_skipped"`).
 
 The category set:
 - **Safe to remove**: `merged`, `closed`, `empty`, `duplicate`
@@ -81,13 +83,12 @@ If the user chose to remove something, run:
 ${CLAUDE_SKILL_DIR}/assets/worktree-cleanup.sh --apply --categories=<comma-separated selected categories>
 ```
 
-This does **not** re-scan — it operates on the plan cache written in Step 1, so what was shown to the user is exactly what gets acted on. Before touching anything, it re-validates that every requested category is in the safe set (rejecting otherwise) and hard-excludes any `dirty_skipped` entry regardless of what's requested. Immediately before removing each individual worktree, it re-checks that worktree's current HEAD sha and working-tree cleanliness against what the plan recorded — a worktree that was mutated (advanced by a new commit, or made dirty) since the scan is skipped rather than removed, since a multi-entry removal run can span minutes and state can drift mid-run. It never passes any branch-deletion flag to the underlying `wt remove` call — branches always survive; only the worktree directory is removed.
+This does **not** re-scan — it operates on the plan cache written in Step 1, so what was shown to the user is exactly what gets acted on. Before touching anything, it re-validates that every requested category is in the safe set (rejecting otherwise) and hard-excludes any `dirty_skipped` entry regardless of what's requested. Immediately before removing each individual worktree, it re-checks five things against what the plan recorded, all via plain local `git` reads (no `gh`, no `wt list`, no re-categorization): that the path is still a worktree of the current repo (catches a stale/moved worktree, or a plan file from a different repo); that the path isn't the worktree the apply run is itself standing in; that the commit sha hasn't advanced; that the worktree hasn't become dirty; and that it hasn't gained more ignored files than the scan recorded (ignored files are the one thing this tool can still destroy, since branches are never deleted). Any mismatch skips just that entry rather than removing it — a multi-entry removal run can span minutes and state can drift mid-run. It never passes any branch-deletion flag to the underlying `wt remove` call — branches always survive; only the worktree directory is removed.
 
 Parse the final summary output and report each branch's outcome to the user:
-- **`deleted`** — worktree removed, branch retained (fully merged, per wt's own detection).
-- **`retained_unmerged`** — worktree removed, branch retained (wt couldn't confirm it was merged).
+- **`removed`** — the worktree directory is gone. The branch itself always survives (`--no-delete-branch` is unconditional), so there's only this one success outcome — don't read anything into it about whether the branch was "actually" merged; that's what the scan's `category` already told you.
 - **`failed`** — removal attempt errored; show the failure detail.
-- **`skipped_drift`** — not removed because the worktree changed since the scan (either its commit advanced or it became dirty); show the reason. Tell the user to re-scan (re-run this skill) to pick these up on a future pass — the current plan cache is now stale for that entry.
+- **`skipped_drift`** — not removed because something changed since the scan (path no longer a worktree of this repo, is the current worktree, commit advanced, became dirty, or gained ignored files); show the reason. Tell the user to re-scan (re-run this skill) to pick these up on a future pass — the current plan cache is now stale for that entry.
 
 If the plan the apply step consumed was written more than 60 minutes before this apply ran, the script emits a staleness warning rather than failing — surface that warning to the user if present, but the apply still proceeds.
 

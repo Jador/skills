@@ -309,11 +309,36 @@ wtc_ignored_count() {
 # and augments each entry with an `ignored_count` (files ignored per
 # `.gitignore`, counted via `wtc_ignored_count`; not read from `wt`, which
 # doesn't report it). Writes a single JSON array to stdout.
+#
+# Failure contract (mirrors detect_repo_slug's pattern): `wt list`'s exit
+# code is captured explicitly and its stderr is captured to a temp file
+# (never merged onto stdout with 2>&1, which would corrupt the JSON on the
+# success path -- wt's schema-deprecation warning goes to stderr even on
+# exit 0). A non-zero exit fails loudly with wt's own stderr text, rather
+# than letting `raw="$(...)"` trip `set -e` and kill the script with no
+# message at all (the previous behavior, discarding stderr unconditionally
+# via `2>/dev/null` regardless of exit code). Exit 0 with empty stdout is
+# treated as "zero worktrees" -- a real, if unusual, possibility once a
+# non-zero exit is no longer conflated with it.
 wtc_inventory() {
   local raw normalized line path count merged
   local -a results
+  local stderr_file wt_exit stderr_text
 
-  raw="$("$WT_BIN" list --format=json 2>/dev/null)"
+  stderr_file="$(mktemp)"
+  if raw="$("$WT_BIN" list --format=json 2>"$stderr_file")"; then
+    wt_exit=0
+  else
+    wt_exit=$?
+  fi
+  stderr_text="$(cat "$stderr_file")"
+  rm -f "$stderr_file"
+
+  if [[ "$wt_exit" -ne 0 ]]; then
+    echo "ERROR: failed to list worktrees via '${WT_BIN} list --format=json' (exit ${wt_exit}):" >&2
+    echo "  ${stderr_text}" >&2
+    exit 1
+  fi
 
   if [[ -z "$raw" ]]; then
     echo "[]"
@@ -346,14 +371,16 @@ wtc_inventory() {
 #
 # wtc_lookup_pr <branch> <repo_slug> prints exactly one line of JSON to
 # stdout, one of:
-#   {"category":"error"}                                   gh exited non-zero
+#   {"category":"error","reason":"<gh's stderr text>"}    gh exited non-zero
 #   {"category":"no_pr"}                                    gh succeeded, 0 PRs match
 #   {"category":"pr","state":...,"number":...,"title":...,
 #    "url":...,"headRefOid":...}                            gh succeeded, PR selected
 #
 # A non-zero `gh` exit always yields "error" — it never falls through to
 # "no_pr" (a real API/auth/network failure must not be silently treated as
-# "nothing to clean up here").
+# "nothing to clean up here"). The "reason" carries gh's own stderr text so
+# the failure mode (auth vs rate limit vs network) is visible, not just the
+# fact that it failed.
 #
 # Selection precedence (this layer owns it; Task 7's ladder never sees more
 # than one PR per branch and never re-derives this): a head branch can
@@ -432,21 +459,29 @@ wtc_select_pr() {
 #
 # See section header above for the returned JSON shapes and precedence
 # contract. Caches its result per-branch (see wtc_pr_cache_get/set).
+#
+# On a non-zero `gh` exit, the error result carries a "reason" field with
+# gh's own stderr text (rather than discarding it) so a caller can report
+# *why* the lookup failed (auth vs rate limit vs network) instead of just
+# that it did.
 wtc_lookup_pr() {
-  local branch="$1" repo_slug="$2" cached raw result
+  local branch="$1" repo_slug="$2" cached raw result stderr_file stderr_text
 
   if cached="$(wtc_pr_cache_get "$branch")"; then
     printf '%s\n' "$cached"
     return 0
   fi
 
+  stderr_file="$(mktemp)"
   if raw="$("$GH_BIN" pr list --repo "$repo_slug" --head "$branch" --state all \
       --json state,number,title,url,headRefOid,mergedAt,closedAt,updatedAt \
-      2>/dev/null)"; then
+      2>"$stderr_file")"; then
     result="$(printf '%s' "$raw" | wtc_select_pr)"
   else
-    result='{"category":"error"}'
+    stderr_text="$(cat "$stderr_file")"
+    result="$(jq -c -n --arg reason "$stderr_text" '{category: "error", reason: $reason}')"
   fi
+  rm -f "$stderr_file"
 
   wtc_pr_cache_set "$branch" "$result"
   printf '%s\n' "$result"
@@ -484,15 +519,23 @@ wtc_lookup_pr() {
 #                   not an ancestor of default). Never auto-removed.
 #
 # Dirty override (applied last, unconditionally): if the entry's `dirty`
-# flag is true, the category above is discarded and replaced with
-# "dirty_skipped", no matter what the ladder produced -- including
-# overriding "open" and "merged". This exists as defense-in-depth per
-# Task 1's empirical finding that `wt remove --no-delete-branch --foreground`
-# (never passed `-f`/`--force` by this script) already refuses any dirty
-# worktree on its own -- but the categorization layer still needs to
-# surface "dirty_skipped" as its own reported category (not just rely on
-# apply-time failure), and later apply logic (Task 12) must independently
-# re-check dirtiness before removing rather than trusting a stale plan.
+# flag is true, the reported `category` becomes "dirty_skipped", no matter
+# what the ladder produced -- including overriding "open" and "merged".
+# This exists as defense-in-depth per Task 1's empirical finding that
+# `wt remove --no-delete-branch --foreground` (never passed `-f`/`--force`
+# by this script) already refuses any dirty worktree on its own -- but the
+# categorization layer still needs to surface "dirty_skipped" as its own
+# reported category (not just rely on apply-time failure), and later apply
+# logic (Task 12) must independently re-check dirtiness before removing
+# rather than trusting a stale plan.
+#
+# The override MERGES onto the ladder's result rather than replacing it:
+# pr_number/pr_title/pr_url survive if the ladder had selected a PR (so a
+# dirty worktree with an open PR still shows as active work, not just
+# junk), and an `original_category`/`original_reason` pair records what
+# the ladder decided before the override (so a dirty entry whose PR lookup
+# itself failed is still visible to wtc_emit_scan_warnings as an `error`,
+# not silently swallowed by the override).
 # ---------------------------------------------------------------------------
 
 # wtc_check_tip <path> <local_sha> <remote_sha>
@@ -715,7 +758,14 @@ wtc_categorize_entry() {
   lookup_category="$(jq -r '.category' <<<"$lookup")"
 
   if [[ "$lookup_category" == "error" ]]; then
-    ladder='{"category":"error","reason":"PR lookup failed (the '"'"'gh pr list'"'"' call for this branch exited non-zero)."}'
+    local lookup_reason
+    lookup_reason="$(jq -r '.reason // empty' <<<"$lookup")"
+    if [[ -n "$lookup_reason" ]]; then
+      ladder="$(jq -c -n --arg reason "gh pr list failed: ${lookup_reason}" \
+        '{category: "error", reason: $reason}')"
+    else
+      ladder='{"category":"error","reason":"PR lookup failed (the '"'"'gh pr list'"'"' call for this branch exited non-zero)."}'
+    fi
   elif [[ "$lookup_category" == "no_pr" ]]; then
     ladder="$(wtc_categorize_no_pr "$entry_json" "$no_pr_map_json")"
   else
@@ -739,10 +789,30 @@ wtc_categorize_entry() {
     esac
   fi
 
-  # Dirty override: applied last, unconditionally, discarding whatever
-  # the ladder produced above -- see the section header comment.
+  # Dirty override: applied last, unconditionally. Sets category/reason to
+  # dirty_skipped, but MERGES onto the ladder's own result rather than
+  # replacing it outright -- see the section header comment for why: a
+  # replace would silently drop pr_number/pr_title/pr_url (so a dirty
+  # worktree with an open PR loses any record that it's active work, not
+  # just abandoned junk) and would erase the fact that the underlying
+  # lookup was itself a "error", masking that from wtc_emit_scan_warnings.
+  # original_category/original_reason preserve what the ladder decided
+  # before the override, for both of those reasons -- present only on
+  # entries the dirty override actually touched, so non-dirty entries keep
+  # their existing shape unchanged.
   if [[ "$dirty" == "true" ]]; then
-    ladder='{"category":"dirty_skipped","reason":"worktree has uncommitted changes (dirty override)"}'
+    local orig_category orig_reason
+    orig_category="$(jq -r '.category' <<<"$ladder")"
+    orig_reason="$(jq -r '.reason // empty' <<<"$ladder")"
+    if [[ -n "$orig_reason" ]]; then
+      ladder="$(jq -c --arg oc "$orig_category" --arg or_ "$orig_reason" \
+        '. + {category: "dirty_skipped", reason: "worktree has uncommitted changes (dirty override)", original_category: $oc, original_reason: $or_}' \
+        <<<"$ladder")"
+    else
+      ladder="$(jq -c --arg oc "$orig_category" \
+        '. + {category: "dirty_skipped", reason: "worktree has uncommitted changes (dirty override)", original_category: $oc}' \
+        <<<"$ladder")"
+    fi
   fi
 
   jq -c --argjson base "$ladder" '. + $base' <<<"$entry_json"
@@ -872,9 +942,27 @@ wtc_write_plan_cache() {
 # ---------------------------------------------------------------------------
 # Apply flow (Task 12) — loads a previously cached plan (never re-scans),
 # validates the requested categories against the safe set, re-verifies
-# per-entry sha/dirty drift immediately before each removal, and removes
-# surviving entries via `wt remove --no-delete-branch --foreground
-# --format=json`.
+# per-entry worktree provenance/self-targeting/sha/dirty/ignored-files
+# drift immediately before each removal, and removes surviving entries via
+# `wt remove --no-delete-branch --foreground --format=json`.
+#
+# The drift guard's five checks (see cmd_apply step 6) are all plain local
+# reads -- no `gh`, no `wt list`, no re-categorization -- and each can only
+# ever remove an entry FROM the removable set, never add one to it:
+#   - provenance: is this path still a worktree of the repo we're
+#     standing in? (catches a stale/moved worktree, or a `--plan=<path>`
+#     from a different repo -- `wt remove <branch>` resolves its target
+#     repo from this process's cwd, not from the entry's stored path, so
+#     without this check a same-named branch in the wrong repo could be
+#     removed instead.)
+#   - self-targeting: is this path the worktree the apply run is itself
+#     standing in?
+#   - sha drift: has the branch advanced since the scan?
+#   - dirty drift: has the worktree become dirty since the scan?
+#   - ignored-files drift: has the worktree gained MORE ignored files
+#     since the scan? (`git status --porcelain` can't see these at all --
+#     they're the one thing this tool can still destroy even though
+#     branches are never deleted.)
 # ---------------------------------------------------------------------------
 
 # Safe-to-apply categories. `dirty_skipped`, `open`, `needs_review`, and
@@ -921,36 +1009,43 @@ wtc_epoch_from_iso8601() {
 # prints a single compact JSON object describing the script's own outcome
 # for this removal:
 #   {"outcome":"failed","detail":"<stderr text>"}   -- non-zero exit.
-#   {"outcome":"deleted"}                            -- exit 0, and wt's own
-#                                                        stderr reported the
-#                                                        branch as
-#                                                        "Branch integrated"
-#                                                        (merged into / an
-#                                                        ancestor of the
-#                                                        currently checked
-#                                                        out branch).
-#   {"outcome":"retained_unmerged"}                  -- exit 0, but wt's
-#                                                        stderr did not
-#                                                        report the branch
-#                                                        as integrated (the
-#                                                        worktree is gone;
-#                                                        the branch survives
-#                                                        as a plain,
-#                                                        unmerged-per-wt
-#                                                        local branch).
+#   {"outcome":"removed"}                            -- exit 0: the
+#                                                        worktree directory
+#                                                        is gone. The
+#                                                        branch itself is
+#                                                        ALWAYS retained
+#                                                        (--no-delete-branch
+#                                                        is unconditional),
+#                                                        so there is only
+#                                                        one success
+#                                                        outcome -- the
+#                                                        branch's fate never
+#                                                        varies, so it isn't
+#                                                        encoded as a second
+#                                                        outcome value.
 #
-# Empirically (see NOTES-task1-wt-remove-findings.md, and this task's own
+# Empirically (see NOTES-task1-wt-remove-findings.md, and manual
 # scratch-clone verification), `wt remove --format=json`'s own
 # `branch_outcome` field is *always* "not_attempted" whenever
 # `--no-delete-branch` is passed -- because that flag makes wt skip its own
 # branch-deletion attempt entirely, so the field can never distinguish
 # "would have been deleted" from "wouldn't have been". That is exactly why
-# this script never trusts that field: the deleted/retained_unmerged split
-# above is derived instead from the exit code plus wt's human-readable
-# stderr text (the "Branch integrated (...); retained with
-# --no-delete-branch" line vs. its absence), which was observed to reliably
-# track whether wt's own merge-check considered the branch fully
-# incorporated.
+# this script never trusts that field.
+#
+# An earlier version of this function also split the exit-0 case into
+# "deleted"/"retained_unmerged" based on whether wt's stderr contained
+# "Branch integrated" -- i.e. wt's own local ancestry check, which the
+# categorization ladder above deliberately does NOT trust for merge/closed
+# status (unreliable for squash merges; `gh` is the authority there
+# instead). Surfacing wt's local check as a second outcome value meant the
+# apply summary would routinely contradict the category the user had just
+# approved (a squash-merged branch scans as "merged" but apply said
+# "retained_unmerged"), and worse, the value named "deleted" actually meant
+# "the branch survived" -- the most alarming word in the vocabulary meant
+# the opposite of what it said, in a tool whose #1 invariant is "no branch
+# is ever deleted". Collapsed to one outcome because the branch's fate is
+# invariant by design and doesn't need a signal that disagrees with the
+# scan's own categorization.
 wtc_wt_remove() {
   local branch="$1" stdout_file stderr_file exit_code stderr_text
 
@@ -969,10 +1064,8 @@ wtc_wt_remove() {
 
   if [[ "$exit_code" -ne 0 ]]; then
     jq -c -n --arg detail "$stderr_text" '{outcome: "failed", detail: $detail}'
-  elif [[ "$stderr_text" == *"Branch integrated"* ]]; then
-    jq -c -n '{outcome: "deleted"}'
   else
-    jq -c -n '{outcome: "retained_unmerged"}'
+    jq -c -n '{outcome: "removed"}'
   fi
 }
 
@@ -1019,10 +1112,14 @@ wtc_print_apply_summary() {
 # "Empty (0):" header ever prints.
 #
 # Each entry line is "  <branch>", plus " (<N> ignored file[s])" appended
-# only when that entry's ignored_count is non-zero, plus " -- <reason>"
-# appended whenever the entry carries a reason (in practice: needs_review,
-# dirty_skipped, and error entries that populate one; safe/open entries
-# normally don't carry a reason at all).
+# only when that entry's ignored_count is non-zero, plus
+# " [would otherwise be: <label>]" appended only for a dirty_skipped entry
+# whose dirty override actually superseded a more specific category (e.g.
+# an open PR, or a failed PR lookup) -- see the dirty-override merge in
+# wtc_categorize_entry -- plus " -- <reason>" appended whenever the entry
+# carries a reason (in practice: needs_review, dirty_skipped, and error
+# entries that populate one; safe/open entries normally don't carry a
+# reason at all).
 #
 # Closing line: names the plan cache path and a copy-pasteable next
 # `--apply --categories=...` command, restricted to whichever safe
@@ -1058,8 +1155,11 @@ wtc_render_text_report() {
       (if ((.ignored_count // 0) > 0) then
          " (\(.ignored_count) ignored file" + (if .ignored_count == 1 then "" else "s" end) + ")"
        else "" end) as $ignored
+      | (if ((.original_category // "") != "") then
+           " [would otherwise be: " + cat_label(.original_category) + "]"
+         else "" end) as $was
       | (if ((.reason // "") != "") then " -- \(.reason)" else "" end) as $reason
-      | "  " + .branch + $ignored + $reason;
+      | "  " + .branch + $ignored + $was + $reason;
     . as $entries
     | ["merged","closed","empty","duplicate","open","needs_review","dirty_skipped","error"][]
     | . as $cat
@@ -1103,17 +1203,23 @@ wtc_render_text_report() {
 # the skill invoking this script with --format=json) can parse stdout
 # directly without stripping anything out.
 #
-# This prints one warning line per "error" category entry (a `gh` call
-# failed for that branch's PR lookup — see wtc_lookup_pr) to stderr, naming
-# the branch. It is called unconditionally from cmd_scan (both formats),
-# never touches stdout, and is a no-op when there are no "error" entries.
+# This prints one warning line per entry whose PR lookup failed (a `gh`
+# call failed for that branch — see wtc_lookup_pr) to stderr, naming the
+# branch. Matches on `original_category == "error"` (falling back to
+# `category == "error"` for entries the dirty override never touched, i.e.
+# `original_category` is absent) rather than `category` alone, so a dirty
+# worktree whose PR lookup also failed still gets this warning even though
+# its reported category is "dirty_skipped", not "error" -- see the dirty
+# override's header comment. Called unconditionally from cmd_scan (both
+# formats), never touches stdout, and is a no-op when there are no
+# lookup-failure entries.
 wtc_emit_scan_warnings() {
   local categorized_json="$1" line branch
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     branch="$(jq -r '.branch' <<<"$line")"
     echo "WARNING: PR lookup failed for branch '${branch}' (gh error); categorized as 'error' -- verify manually." >&2
-  done <<<"$(jq -c '.[] | select(.category == "error")' <<<"$categorized_json")"
+  done <<<"$(jq -c '.[] | select((.original_category // .category) == "error")' <<<"$categorized_json")"
 }
 
 cmd_scan() {
@@ -1148,7 +1254,9 @@ cmd_apply() {
   local cache_path plan_json target_categories cat generated_at gen_epoch
   local now_epoch age_seconds filtered_entries entry branch path category
   local recorded_sha current_sha porcelain remove_result outcome detail
-  local -a target_list summary_results
+  local recorded_ignored current_ignored is_known_worktree kp
+  local current_worktree_root
+  local -a target_list summary_results known_worktree_paths
   local any_failed=false
 
   # --- 1. Determine plan path. -------------------------------------------
@@ -1212,6 +1320,25 @@ cmd_apply() {
   ' <<<"$plan_json")"
 
   # --- 6. Per-entry drift guard + removal, sequentially. ------------------
+  #
+  # Two more local-only checks (provenance, self-targeting) run once up
+  # front rather than per-entry, since both need only be computed once for
+  # the whole apply run: `wt remove <branch>` resolves the repo/branch
+  # implicitly from THIS process's cwd, not from the entry's stored
+  # `path` -- so an entry whose `path` no longer corresponds to a worktree
+  # of the repo we're actually standing in (a stale/moved worktree, or a
+  # `--plan=<path>` from a different repo entirely) would pass the sha/
+  # dirty checks below (which only look at that path in isolation) and
+  # then remove a same-named branch in the WRONG repo. Cross-checking each
+  # entry's path against this repo's own `git worktree list` (plain local
+  # git, not `wt`/`gh`) closes that gap without violating "apply never
+  # re-scans" -- it re-verifies membership, never re-derives a category.
+  known_worktree_paths=()
+  while IFS= read -r kp; do
+    [[ -n "$kp" ]] && known_worktree_paths+=("$kp")
+  done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print substr($0, 10)}')
+  current_worktree_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
   summary_results=()
 
   while IFS= read -r entry; do
@@ -1220,9 +1347,35 @@ cmd_apply() {
     branch="$(jq -r '.branch' <<<"$entry")"
     path="$(jq -r '.path' <<<"$entry")"
     recorded_sha="$(jq -r '.sha' <<<"$entry")"
+    recorded_ignored="$(jq -r '.ignored_count // 0' <<<"$entry")"
     category="$(jq -r '.category' <<<"$entry")"
 
-    # 6a. sha drift: plain local read, no gh, no wt list, no re-categorization.
+    # 6a. provenance: this path must still be a worktree this repo's own
+    # git knows about, or the plan may be stale/moved/from another repo.
+    is_known_worktree=false
+    for kp in "${known_worktree_paths[@]}"; do
+      if [[ "$kp" == "$path" ]]; then
+        is_known_worktree=true
+        break
+      fi
+    done
+    if [[ "$is_known_worktree" != "true" ]]; then
+      summary_results+=("$(jq -c -n \
+        --arg branch "$branch" --arg category "$category" \
+        '{branch: $branch, category: $category, outcome: "skipped_drift", reason: "path is not a worktree of the current repository (plan may be stale or from a different repo)"}')")
+      continue
+    fi
+
+    # 6b. self-targeting: never remove the worktree this apply run is
+    # itself standing in.
+    if [[ -n "$current_worktree_root" && "$path" == "$current_worktree_root" ]]; then
+      summary_results+=("$(jq -c -n \
+        --arg branch "$branch" --arg category "$category" \
+        '{branch: $branch, category: $category, outcome: "skipped_drift", reason: "path is the worktree this apply run is currently standing in"}')")
+      continue
+    fi
+
+    # 6c. sha drift: plain local read, no gh, no wt list, no re-categorization.
     current_sha="$(git -C "$path" rev-parse HEAD 2>/dev/null || true)"
     if [[ "$current_sha" != "$recorded_sha" ]]; then
       summary_results+=("$(jq -c -n \
@@ -1231,7 +1384,7 @@ cmd_apply() {
       continue
     fi
 
-    # 6b. dirty drift: plain local read.
+    # 6d. dirty drift: plain local read.
     porcelain="$(git -C "$path" status --porcelain 2>/dev/null || true)"
     if [[ -n "$porcelain" ]]; then
       summary_results+=("$(jq -c -n \
@@ -1240,7 +1393,23 @@ cmd_apply() {
       continue
     fi
 
-    # 6c. both checks passed -- remove.
+    # 6e. ignored-files drift: the one thing this tool can still destroy
+    # even though branches are never deleted (ignored-but-real per-worktree
+    # state -- .env files, local build output). `git status --porcelain`
+    # above can't see ignored files at all, so this is a separate check:
+    # if the worktree has gained MORE ignored files since the scan
+    # recorded ignored_count, something real may have shown up there since
+    # -- skip rather than silently risk it.
+    current_ignored="$(wtc_ignored_count "$path")"
+    if (( current_ignored > recorded_ignored )); then
+      summary_results+=("$(jq -c -n \
+        --arg branch "$branch" --arg category "$category" \
+        --arg reason "ignored files increased since scan (${recorded_ignored} -> ${current_ignored})" \
+        '{branch: $branch, category: $category, outcome: "skipped_drift", reason: $reason}')")
+      continue
+    fi
+
+    # 6f. all checks passed -- remove.
     remove_result="$(wtc_wt_remove "$branch")"
     outcome="$(jq -r '.outcome' <<<"$remove_result")"
 
