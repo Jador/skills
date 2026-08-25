@@ -15,6 +15,7 @@ Personal productivity skills for Claude Code.
 | **MQ** | `/jador:mq` | Monitor merge queue and auto-retry failed Buildkite jobs (checks every 2 min) |
 | **Backlog** | `/jador:backlog` | Surface idle work — notes without ideas, ideas without plans, plans without execution |
 | **Notepad** | `/jador:notepad` | Quick scratch pad for capturing, listing, and managing ideas |
+| **Prune Comments** | `/jador:prune-comments` | Hunts unjustified comments in a changeset or file list via the read-only `jador:comment-auditor` agent and deletes them, keeping only the fixed exception list — asks the user only on genuine judgment calls, and fixes `MUST KILL` symbols at root-cause scope |
 | **Skill Builder** | `/jador:skill-builder` | Scaffold new Claude Code skills through guided conversation |
 
 ## Workflow
