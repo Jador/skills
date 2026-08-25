@@ -1024,8 +1024,8 @@ wtc_epoch_from_iso8601() {
 #                                                        encoded as a second
 #                                                        outcome value.
 #
-# Empirically (see NOTES-task1-wt-remove-findings.md, and manual
-# scratch-clone verification), `wt remove --format=json`'s own
+# Empirically (via manual scratch-clone verification), `wt remove
+# --format=json`'s own
 # `branch_outcome` field is *always* "not_attempted" whenever
 # `--no-delete-branch` is passed -- because that flag makes wt skip its own
 # branch-deletion attempt entirely, so the field can never distinguish
