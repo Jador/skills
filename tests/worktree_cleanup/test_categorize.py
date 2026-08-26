@@ -1,5 +1,4 @@
-"""Tests for worktree-cleanup.sh's categorization ladder + dirty override
-(Task 7).
+"""Tests for worktree-cleanup.sh's categorization ladder + dirty override.
 
 Behavioural contract under test (see the "Categorization ladder" section
 in worktree-cleanup.sh):
@@ -14,9 +13,6 @@ in worktree-cleanup.sh):
    ("N commits ahead of the merged PR.").
 4. The same two outcomes apply to a closed (not merged) PR, with the
    reason string naming "the closed PR" instead.
-5. A branch with no PR at all hands off to the Task 8 extension point
-   (wtc_categorize_no_pr), surfaced for now as the placeholder category
-   "no_pr_pending".
 6. A `gh` failure during PR lookup yields category "error".
 7. The dirty override applies last and unconditionally: a dirty worktree
    is always categorized "dirty_skipped", regardless of what the ladder
@@ -53,8 +49,8 @@ def _init_git_repo(path: Path) -> str:
 
     Forces the initial branch name to something that is never "main" (or
     any other plausible default), regardless of the ambient
-    `init.defaultBranch` config -- so no_pr/empty-detection tests (Task 8)
-    that check ancestry against a "default_branch" name never accidentally
+    `init.defaultBranch` config -- so no_pr/empty-detection tests that
+    check ancestry against a "default_branch" name never accidentally
     pass just because this repo's own default branch happens to be named
     the same thing.
     """
@@ -266,9 +262,9 @@ def test_closed_pr_equal_tip_is_safe(tmp_path, run_script, fake_bins):
 
 def test_no_pr_singleton_is_needs_review(tmp_path, run_script, fake_bins):
     """A no-PR branch with a unique sha (not an ancestor of the default
-    branch, and sharing its sha with no other no-PR branch) lands on
-    Task 8's no-PR ladder as a "needs_review" singleton -- never a safe
-    category, since there's no PR to cross-check position against.
+    branch, and sharing its sha with no other no-PR branch) lands on the
+    no-PR ladder as a "needs_review" singleton -- never a safe category,
+    since there's no PR to cross-check position against.
     """
     repo = tmp_path / "wt"
     sha = _init_git_repo(repo)

@@ -1,16 +1,15 @@
 """Formal, comprehensive end-to-end tests for worktree-cleanup.sh's full
-categorization pipeline (Task 13) -- covering wtc_inventory (Task 5),
-wtc_lookup_pr (Task 6), the categorization ladder + dirty override
-(Task 7), and the no-PR empty/duplicate-sha detection (Task 8), all wired
-together through the script's CLI via the `--debug-categorize` hook.
+categorization pipeline -- covering wtc_inventory, wtc_lookup_pr, the
+categorization ladder + dirty override, and the no-PR empty/duplicate-sha
+detection, all wired together through the script's CLI via the
+`--debug-categorize` hook.
 
-This suite is the one named explicitly by the plan's verification step.
-It overlaps intentionally with the more granular, per-task test files
+It overlaps intentionally with the more granular test files
 (test_pr_lookup.py, test_categorize.py, test_no_pr_categorize.py) -- this
-file exists to stand on its own with one case per ladder outcome, per the
-plan's exact case list, plus the reused-branch precedence case that proves
-Task 6's open > merged > closed PR-selection precedence is honored all the
-way through the full pipeline (not just the lookup layer in isolation).
+file exists to stand on its own with one case per ladder outcome, plus
+the reused-branch precedence case that proves open > merged > closed
+PR-selection precedence is honored all the way through the full pipeline
+(not just the lookup layer in isolation).
 
 Behavioural contract under test (see the "Categorization ladder" section
 in worktree-cleanup.sh):
@@ -428,7 +427,7 @@ def test_is_main_and_is_current_excluded_from_categorized_output(tmp_path, run_s
 def test_reused_branch_open_wins_over_closed_and_is_never_safe(tmp_path, run_script, fake_bins):
     """A single head branch carrying two PRs -- one CLOSED, one separate
     and later OPEN -- must categorize as "open" (informational, never
-    removed), never "closed". This proves Task 6's open > merged > closed
+    removed), never "closed". This proves the open > merged > closed
     precedence is honored end-to-end through the full categorization
     pipeline, and that a reused branch with live work on it can never land
     in the safe/removable set."""

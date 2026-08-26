@@ -1,5 +1,4 @@
-"""Tests for worktree-cleanup.sh's no-PR empty/duplicate-sha detection
-(Task 8).
+"""Tests for worktree-cleanup.sh's no-PR empty/duplicate-sha detection.
 
 Behavioural contract under test (see "Categorization ladder" ->
 wtc_compute_no_pr_categories / wtc_categorize_no_pr in

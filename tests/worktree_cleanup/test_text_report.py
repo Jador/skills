@@ -1,6 +1,6 @@
 """Snapshot-style tests for worktree-cleanup.sh's human-readable text
-report renderer (Task 10) -- ``wtc_render_text_report``, wired into
-``cmd_scan`` for the default/``--format=text`` path.
+report renderer -- ``wtc_render_text_report``, wired into ``cmd_scan``
+for the default/``--format=text`` path.
 
 Behavioural contract under test (see the "Human-readable text report"
 section in worktree-cleanup.sh):

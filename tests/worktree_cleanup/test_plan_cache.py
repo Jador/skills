@@ -1,10 +1,10 @@
-"""Tests for worktree-cleanup.sh's plan cache write (Task 9).
+"""Tests for worktree-cleanup.sh's plan cache write.
 
 Behavioural contract under test (see "Plan cache write" ->
 wtc_write_plan_cache in worktree-cleanup.sh):
 
-1. Every `cmd_scan` invocation writes the plan cache to the Task 4 cache
-   path (`<git-common-dir>/worktree-cleanup-plan.json`), regardless of
+1. Every `cmd_scan` invocation writes the plan cache to the cache path
+   (`<git-common-dir>/worktree-cleanup-plan.json`), regardless of
    --format.
 2. The written file is valid JSON containing `generated_at`, `repo`,
    `default_branch`, and `entries` (the categorized entries array).

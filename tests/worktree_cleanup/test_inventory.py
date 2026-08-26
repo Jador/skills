@@ -1,4 +1,4 @@
-"""Tests for worktree-cleanup.sh's worktree inventory (Task 5).
+"""Tests for worktree-cleanup.sh's worktree inventory.
 
 Behavioural contract under test:
 
@@ -12,15 +12,14 @@ Behavioural contract under test:
    classified dirty, and its ignored-file count reflects that file.
 4. A worktree with only untracked (non-ignored) changes IS classified
    dirty (per `wt remove`'s refusal to remove untracked-only worktrees
-   without `-f`; see Task 1's spike notes), and its ignored-file count is 0.
+   without `-f`), and its ignored-file count is 0.
 5. `wt`'s stderr (a schema-deprecation warning on real `wt` v0.74.0) never
    leaks into the JSON the script parses -- the fake `wt` always emits one,
    and every assertion here depends on `stdout` being clean, valid JSON.
 
 Fixture JSON payloads mirror the real shapes captured from an actual
 installed `wt v0.74.0` (schema 1 default; schema 2 obtained by forcing
-`--config-set list.json-schema=2`) -- see the Task 5 report for the raw
-samples this was modeled on.
+`--config-set list.json-schema=2`).
 """
 
 from __future__ import annotations
@@ -276,7 +275,7 @@ def test_inventory_normalizes_both_schemas(
     assert "schema" not in result.stdout
     assert "schema" not in result.stderr
 
-    # Task 11: --format=json prints the full plan object (generated_at/
+    # --format=json prints the full plan object (generated_at/
     # repo/default_branch/entries[]) -- the same schema written to the
     # plan cache -- not a bare array of entries.
     plan = json.loads(result.stdout)
@@ -333,7 +332,7 @@ def test_schema1_and_schema2_produce_identical_inventory(
     assert result1.returncode == 0
     assert result2.returncode == 0
 
-    # Task 11: unwrap the plan object's entries[] -- see the comment in
+    # unwrap the plan object's entries[] -- see the comment in
     # test_inventory_normalizes_both_schemas above.
     inventory1 = json.loads(result1.stdout)["entries"]
     inventory2 = json.loads(result2.stdout)["entries"]
@@ -346,10 +345,10 @@ def test_text_format_reports_category_and_dirty_override(
     tmp_path, worktree_paths, run_script, fake_bins
 ):
     """cmd_scan's text report now surfaces the categorization ladder's
-    output (Task 7) rather than the raw dirty/ignored fields directly:
-    a no-PR, clean worktree with a unique (fabricated, non-ancestor) sha
-    reports "needs_review" (Task 8's no-PR singleton case), and a no-PR
-    but dirty worktree is forced to "dirty_skipped" by the dirty override
+    output rather than the raw dirty/ignored fields directly: a no-PR,
+    clean worktree with a unique (fabricated, non-ancestor) sha reports
+    "needs_review" (the no-PR singleton case), and a no-PR but dirty
+    worktree is forced to "dirty_skipped" by the dirty override
     -- regardless of what the (no-PR) ladder would otherwise have
     produced.
     """
@@ -374,9 +373,9 @@ def test_text_format_reports_category_and_dirty_override(
     assert result.returncode == 0
     assert "current-branch" not in result.stdout
     assert "untracked-branch" in result.stdout
-    # Task 10's text report renders categories as grouped section headers
-    # (e.g. "Dirty (skipped) (1):") rather than inline "category=..."
-    # tokens -- check the branch is listed under the right section instead.
+    # The text report renders categories as grouped section headers (e.g.
+    # "Dirty (skipped) (1):") rather than inline "category=..." tokens --
+    # check the branch is listed under the right section instead.
     dirty_section = result.stdout.split("Dirty (skipped) (")[1]
     assert "untracked-branch" in dirty_section.splitlines()[1]
     assert "clean-branch" in result.stdout

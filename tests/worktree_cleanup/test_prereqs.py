@@ -1,6 +1,6 @@
 """Tests for worktree-cleanup.sh's prerequisite checks.
 
-``check_prereqs()`` (Task 2) runs before any scan/apply logic and verifies,
+``check_prereqs()`` runs before any scan/apply logic and verifies,
 in order, that gh, wt, and jq are on PATH (via ``which``, resolved through
 the ``WTC_GH_BIN``/``WTC_WT_BIN`` indirection), then that we're inside a
 git repo. On any miss it prints an actionable message naming the missing

@@ -1,5 +1,5 @@
 """Tests for worktree-cleanup.sh's `--apply` argv-safety and drift-guard
-behavior (Task 14).
+behavior.
 
 Behavioural contract under test (see "Apply flow" -> cmd_apply /
 wtc_wt_remove / wtc_is_safe_category / wtc_print_apply_summary in
@@ -128,7 +128,7 @@ def _sha_drift_entry(main_repo: Path, base_dir: Path, branch: str, category: str
     """
     wt_path = base_dir / branch
     recorded_sha = _add_worktree(main_repo, wt_path, branch)
-    _commit_in_worktree(wt_path)  # advances real HEAD past recorded_sha
+    _commit_in_worktree(wt_path)
     return {"branch": branch, "path": str(wt_path), "sha": recorded_sha, "category": category}
 
 

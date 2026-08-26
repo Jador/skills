@@ -117,15 +117,15 @@ while [[ $# -gt 0 ]]; do
       # wtc_lookup_pr for each comma-separated branch in order (repo_slug
       # resolved via detect_repo_slug) and prints one JSON result line per
       # branch, then exits. A branch repeated in the list exercises the
-      # per-run cache (Task 6). Used to unit-test the PR lookup layer
-      # independently of scan/apply/categorization.
+      # per-run cache. Used to unit-test the PR lookup layer independently
+      # of scan/apply/categorization.
       DEBUG_LOOKUP_PR="${1#--debug-lookup-pr=}"
       shift
       ;;
     --debug-categorize)
       # Internal/debug hook, intentionally undocumented in `--help`: runs
-      # the full inventory + categorization ladder (Task 7) against the
-      # current repo context and prints one categorized-entry JSON line
+      # the full inventory + categorization ladder against the current
+      # repo context and prints one categorized-entry JSON line
       # per worktree, then exits. Used to unit-test the ladder
       # (open/merged/closed/needs_review/dirty-override) independently of
       # cmd_scan's text/json report formatting.
@@ -212,7 +212,7 @@ plan_cache_path() {
   # `--git-dir` resolves per-worktree (`<repo>/.git/worktrees/<name>`), which
   # would break scan-here/apply-there across worktrees of the same repo.
   # `--git-common-dir` resolves to the same absolute path from every
-  # worktree of a given repo (verified empirically in Task 4).
+  # worktree of a given repo (verified empirically).
   local common_dir
   common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
   echo "${common_dir}/worktree-cleanup-plan.json"
@@ -228,8 +228,8 @@ plan_cache_path() {
 # envelope `{schema, repo, collected, items: [...]}`; each item nests the
 # same information under `worktree.main`/`worktree.current`/`worktree.path`/
 # `worktree.changes{...}`). Both shapes were captured empirically from a
-# real `wt v0.74.0` install (see Task 5 report) and are handled here so the
-# script keeps working across the schema flip.
+# real `wt v0.74.0` install and are handled here so the script keeps
+# working across the schema flip.
 #
 # The deprecation warning goes to stderr — it is intentionally discarded
 # (never merged onto stdout with 2>&1, which would corrupt the JSON we
@@ -246,7 +246,7 @@ plan_cache_path() {
 # `dirty` is derived (not read from `wt`): true if any of
 # staged/modified/untracked/renamed/deleted is true. Untracked counts as
 # dirty because `wt remove` refuses an untracked-only worktree without `-f`
-# (confirmed empirically in Task 1's spike).
+# (confirmed empirically).
 wtc_normalize_wt_json() {
   jq -c '
     def entries: if type == "array" then . else .items end;
@@ -382,11 +382,11 @@ wtc_inventory() {
 # the failure mode (auth vs rate limit vs network) is visible, not just the
 # fact that it failed.
 #
-# Selection precedence (this layer owns it; Task 7's ladder never sees more
-# than one PR per branch and never re-derives this): a head branch can
-# carry more than one PR after being reused (e.g. an earlier PR was closed,
-# then the same branch was pushed again and opened a new PR). Among all
-# PRs matching the head branch:
+# Selection precedence (this layer owns it; the categorization ladder
+# never sees more than one PR per branch and never re-derives this): a
+# head branch can carry more than one PR after being reused (e.g. an
+# earlier PR was closed, then the same branch was pushed again and opened
+# a new PR). Among all PRs matching the head branch:
 #   - any OPEN PR wins outright, regardless of the other PRs' states;
 #   - otherwise the most recently MERGED PR wins;
 #   - otherwise the most recently CLOSED PR wins.
@@ -488,7 +488,7 @@ wtc_lookup_pr() {
 }
 
 # ---------------------------------------------------------------------------
-# Categorization ladder (Task 7) — for each inventoried worktree, decides
+# Categorization ladder — for each inventoried worktree, decides
 # safety-to-remove by combining wtc_lookup_pr's single selected PR (above)
 # with a local-vs-remote tip check, then applies the dirty override on top.
 #
@@ -508,7 +508,7 @@ wtc_lookup_pr() {
 #   (no_pr)   -- wtc_lookup_pr found no PR at all, ever, for this head
 #                branch. This ladder does not decide anything for that
 #                case itself -- see wtc_categorize_no_pr and
-#                wtc_compute_no_pr_categories below (Task 8):
+#                wtc_compute_no_pr_categories below:
 #     empty      -- the branch's HEAD sha is an ancestor of (or equal to)
 #                   the default branch -- zero unique commits. Safe.
 #     duplicate  -- among no-PR/non-empty branches, >1 share the exact
@@ -521,13 +521,13 @@ wtc_lookup_pr() {
 # Dirty override (applied last, unconditionally): if the entry's `dirty`
 # flag is true, the reported `category` becomes "dirty_skipped", no matter
 # what the ladder produced -- including overriding "open" and "merged".
-# This exists as defense-in-depth per Task 1's empirical finding that
+# This exists as defense-in-depth per the empirical finding that
 # `wt remove --no-delete-branch --foreground` (never passed `-f`/`--force`
 # by this script) already refuses any dirty worktree on its own -- but the
 # categorization layer still needs to surface "dirty_skipped" as its own
 # reported category (not just rely on apply-time failure), and later apply
-# logic (Task 12) must independently re-check dirtiness before removing
-# rather than trusting a stale plan.
+# logic must independently re-check dirtiness before removing rather than
+# trusting a stale plan.
 #
 # The override MERGES onto the ladder's result rather than replacing it:
 # pr_number/pr_title/pr_url survive if the ladder had selected a PR (so a
@@ -610,8 +610,8 @@ wtc_ladder_pr_category() {
 # mtime on checkout/file changes within it); it's not perfect (e.g. an
 # unrelated `touch` inside the worktree would perturb it) but this whole
 # pattern is based on a single observed occurrence (a 17-branch fanned-out
-# agent run collapsing to 2 distinct commits) -- see the plan notes -- so
-# it isn't worth a more elaborate signal. Never fails the caller: a
+# agent run collapsing to 2 distinct commits), so it isn't worth a more
+# elaborate signal. Never fails the caller: a
 # missing/unreadable path yields 0 (bash 3.2 / macOS system `stat`, hence
 # `-f %m` rather than GNU `-c %Y`; a `-c %Y` fallback is included in case
 # this ever runs under a Linux `stat`).
@@ -623,7 +623,7 @@ wtc_dir_mtime() {
 
 # wtc_compute_no_pr_categories <no_pr_entries_json_array> <default_branch>
 #
-# The multi-entry half of Task 8's detection: decides empty/duplicate/
+# The multi-entry half of no-PR detection: decides empty/duplicate/
 # needs_review for a *batch* of no-PR entries at once (duplicate-sha
 # grouping is inherently cross-entry -- it needs to see every no-PR
 # branch's HEAD sha together to find the groups), then hands each entry's
@@ -707,8 +707,8 @@ wtc_compute_no_pr_categories() {
 #
 # Called whenever wtc_lookup_pr returns {"category":"no_pr"} for a branch
 # -- i.e. no PR, of any state, has ever matched this head branch. This
-# ladder (Task 7) deliberately does not decide empty/duplicate/etc.
-# itself, because duplicate-sha grouping is inherently a multi-entry
+# ladder deliberately does not decide empty/duplicate/etc. itself,
+# because duplicate-sha grouping is inherently a multi-entry
 # operation (see wtc_compute_no_pr_categories above) while this function
 # is invoked per-entry from wtc_categorize_entry. Rather than re-deriving
 # the group from scratch per entry, the caller (wtc_categorize_all) runs
@@ -831,9 +831,9 @@ wtc_categorize_entry() {
 # cache-only re-check -- wtc_lookup_pr already memoized the branch ->
 # lookup result on the first call in this run, so this never triggers a
 # second `gh` invocation per branch) and feeds that batch to
-# wtc_compute_no_pr_categories once, up front. This is the resolution to
-# Task 8's core wrinkle: duplicate-sha grouping needs to see every no-PR
-# entry at once, but wtc_categorize_entry's loop below processes entries
+# wtc_compute_no_pr_categories once, up front. This resolves the core
+# wrinkle that duplicate-sha grouping needs to see every no-PR entry at
+# once, but wtc_categorize_entry's loop below processes entries
 # one at a time -- so the multi-entry grouping decision is made here, in a
 # single pass, and handed into the per-entry pass as a precomputed map
 # (see wtc_categorize_no_pr's header comment) rather than trying to make
@@ -877,8 +877,8 @@ wtc_categorize_all() {
 }
 
 # ---------------------------------------------------------------------------
-# Plan cache write (Task 9) — assembles the final plan JSON (metadata plus
-# categorized entries[]) and writes it atomically to the Task 4 cache path:
+# Plan cache write — assembles the final plan JSON (metadata plus
+# categorized entries[]) and writes it atomically to the cache path:
 # write to a sibling temp file, then `mv` it into place, so a reader (the
 # later --apply path, or a concurrent scan) never observes a partially
 # written cache file.
@@ -940,7 +940,7 @@ wtc_write_plan_cache() {
 }
 
 # ---------------------------------------------------------------------------
-# Apply flow (Task 12) — loads a previously cached plan (never re-scans),
+# Apply flow — loads a previously cached plan (never re-scans),
 # validates the requested categories against the safe set, re-verifies
 # per-entry worktree provenance/self-targeting/sha/dirty/ignored-files
 # drift immediately before each removal, and removes surviving entries via
@@ -1099,7 +1099,7 @@ wtc_print_apply_summary() {
 }
 
 # ---------------------------------------------------------------------------
-# Human-readable text report (Task 10) — renders the categorized entries as
+# Human-readable text report — renders the categorized entries as
 # a plain-text report for the default (`--format=text`) scan output. The
 # JSON output path (`--format=json`, in cmd_scan below) is untouched by
 # this: it always prints the raw categorized array.
@@ -1189,15 +1189,14 @@ wtc_render_text_report() {
 }
 
 # ---------------------------------------------------------------------------
-# Commands — cmd_scan wires up repo-context detection (Task 4), the
-# inventory (Task 5), the categorization ladder (Tasks 7-8), the plan
-# cache write (Task 9), and the text report renderer (Task 10, above).
-# cmd_apply's load-and-remove path lands in a later task.
+# Commands — cmd_scan wires up repo-context detection, the inventory, the
+# categorization ladder, the plan cache write, and the text report
+# renderer (above). cmd_apply's load-and-remove path is below.
 # ---------------------------------------------------------------------------
 
 # wtc_emit_scan_warnings <categorized_entries_json_array>
 #
-# Task 11: stdout/stderr discipline. With --format=json, cmd_scan's stdout
+# stdout/stderr discipline. With --format=json, cmd_scan's stdout
 # must carry the plan JSON and nothing else — any diagnostic/warning
 # chatter about the scan has to go to stderr instead, so a consumer (e.g.
 # the skill invoking this script with --format=json) can parse stdout
@@ -1240,7 +1239,7 @@ cmd_scan() {
   wtc_emit_scan_warnings "$categorized"
 
   if [[ "$FORMAT" == "json" ]]; then
-    # Task 11: stdout carries ONLY the plan JSON here -- no progress or
+    # stdout carries ONLY the plan JSON here -- no progress or
     # diagnostic text before or after it. Any such chatter (see
     # wtc_emit_scan_warnings above) goes to stderr instead, so a consumer
     # (e.g. the worktree-cleanup skill) can parse this line directly.
@@ -1259,7 +1258,6 @@ cmd_apply() {
   local -a target_list summary_results known_worktree_paths
   local any_failed=false
 
-  # --- 1. Determine plan path. -------------------------------------------
   cache_path="${PLAN_PATH:-$(plan_cache_path)}"
 
   if [[ ! -f "$cache_path" ]]; then
@@ -1409,7 +1407,6 @@ cmd_apply() {
       continue
     fi
 
-    # 6f. all checks passed -- remove.
     remove_result="$(wtc_wt_remove "$branch")"
     outcome="$(jq -r '.outcome' <<<"$remove_result")"
 
@@ -1426,14 +1423,12 @@ cmd_apply() {
     fi
   done <<<"$(jq -c '.[]' <<<"$filtered_entries")"
 
-  # --- 7. Final summary. ---------------------------------------------------
   if (( ${#summary_results[@]} > 0 )); then
     printf '%s\n' "${summary_results[@]}" | wtc_print_apply_summary
   else
     printf '' | wtc_print_apply_summary
   fi
 
-  # --- 8. Exit non-zero iff any entry failed. -------------------------------
   if [[ "$any_failed" == "true" ]]; then
     return 1
   fi
@@ -1442,7 +1437,7 @@ cmd_apply() {
 
 cmd_debug_context() {
   # Internal/debug hook for --debug-context: prints resolved repo context
-  # so it can be verified directly (see: Task 4 verification step).
+  # so it can be verified directly.
   echo "repo_slug=$(detect_repo_slug)"
   echo "default_branch=$(detect_default_branch)"
   echo "plan_cache_path=$(plan_cache_path)"
@@ -1450,8 +1445,7 @@ cmd_debug_context() {
 
 cmd_debug_lookup_pr() {
   # Internal/debug hook for --debug-lookup-pr=<comma-list>: prints one
-  # wtc_lookup_pr JSON result per listed branch, in order (see: Task 6
-  # verification step).
+  # wtc_lookup_pr JSON result per listed branch, in order.
   local repo_slug branch
   repo_slug="$(detect_repo_slug)"
   local IFS=','
@@ -1463,10 +1457,10 @@ cmd_debug_lookup_pr() {
 cmd_debug_categorize() {
   # Internal/debug hook for --debug-categorize: runs the inventory +
   # categorization ladder against the current repo context and prints one
-  # categorized-entry JSON line per worktree (see: Task 7 verification
-  # step). Unlike cmd_scan, this bypasses --format entirely -- always one
-  # compact JSON object per line, never an array -- to keep ad-hoc/test
-  # assertions on individual entries simple.
+  # categorized-entry JSON line per worktree. Unlike cmd_scan, this
+  # bypasses --format entirely -- always one compact JSON object per
+  # line, never an array -- to keep ad-hoc/test assertions on individual
+  # entries simple.
   local repo_slug default_branch categorized
   repo_slug="$(detect_repo_slug)"
   default_branch="$(detect_default_branch)"

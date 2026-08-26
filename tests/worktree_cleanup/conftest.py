@@ -39,7 +39,6 @@ from typing import Sequence
 
 import pytest
 
-# tests/worktree_cleanup/conftest.py -> tests/worktree_cleanup -> tests -> <repo root>
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT_PATH = (
     REPO_ROOT / "skills" / "worktree-cleanup" / "assets" / "worktree-cleanup.sh"

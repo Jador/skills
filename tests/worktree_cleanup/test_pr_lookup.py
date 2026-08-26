@@ -1,4 +1,4 @@
-"""Tests for worktree-cleanup.sh's PR lookup layer (Task 6).
+"""Tests for worktree-cleanup.sh's PR lookup layer.
 
 Behavioural contract under test (see the "PR lookup layer" section in
 worktree-cleanup.sh):

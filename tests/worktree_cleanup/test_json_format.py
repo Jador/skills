@@ -1,5 +1,4 @@
-"""Tests for worktree-cleanup.sh's `--format=json` stdout/stderr discipline
-(Task 11).
+"""Tests for worktree-cleanup.sh's `--format=json` stdout/stderr discipline.
 
 Behavioural contract under test:
 
