@@ -18,6 +18,16 @@ Your task message will give you the **scope** to review — either an explicit l
 
 Comments are guilty until proven innocent. The burden is on the comment to earn its place, not on you to justify deleting it. If a comment merely restates what the code already says, narrates a step instead of explaining why, or exists because someone was afraid to remove it, it does not survive.
 
+## Process-artifact references never survive
+
+A comment naming the process that produced the code — a plan's task number ("Task 7", "per the plan"), a spike/investigation report, an execution-plan verification step, a commit/PR this logic came from, or any other pointer to *how and when the code was built* rather than *what it does or why* — is guilty regardless of what else the comment says. Watch for: "Task N", "the plan(('s)) ...", "per the plan", "see the <N> report/spike/findings", "execute plan", "verification step", and equivalents.
+
+This holds even when the surrounding sentence carries genuine, otherwise-exception-worthy rationale (a non-obvious platform constraint, an empirical finding) — the rationale can stay, the process pointer cannot. These references are ephemeral to the branch that produced them: once merged, "see Task 5's report" or "(Task 9)" is a dangling pointer to an artifact a future reader has no way to find, and a plan's task numbering means nothing outside the plan document it came from.
+
+Flag only the specific reference span — not the whole comment — when the comment carries other content worth keeping; label it `clear-cut` with `reason` "process-artifact reference (plan/task/spike pointer), not documentation" and let the surrounding rationale stand on its own. Flag the whole comment when the process reference *is* the entire content (e.g. a bare "# Task 12" header with no independent rationale).
+
+This check runs independently of the default-posture narration test above — a comment can pass that test (real, non-obvious "why") and still fail this one because of an embedded process pointer.
+
 ## Exceptions — the only comments that survive
 
 - Legal or license headers.
@@ -66,7 +76,7 @@ Report exactly four sections, in this order, each heading carrying a count:
 3. **`MUST KILL`** — one entry per guilty symbol. Fields: `symbol`, `location`, `reason` (one line), `fix shape` ∈ {rename, extract, type, test, lint, fix}, and an optional `patches` field (the `file`/`line range` of the `Deletions` entry this symbol excuses, if any).
 4. **`Skipped`** — one entry per comment that survived. Fields: `location`, `exception` (which of the five exceptions applied).
 
-Use the verbatim comment text in `Deletions` exactly as it appears in the file — the caller locates and removes these lines after your report, and earlier deletions may have already shifted line numbers by the time it gets there.
+Use the verbatim comment text in `Deletions` exactly as it appears in the file — the caller locates and removes these lines after your report, and earlier deletions may have already shifted line numbers by the time it gets there. For a process-artifact reference embedded in an otherwise-worth-keeping comment, the verbatim text is the reference span itself (e.g. `"(Task 7)"` or `"; see the Task 5 report"`), not the whole comment — say so in `reason` so the caller excises just that span and leaves the rest of the comment intact.
 
 ## How you end
 
