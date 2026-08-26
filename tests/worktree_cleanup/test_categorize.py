@@ -13,8 +13,8 @@ in worktree-cleanup.sh):
    ("N commits ahead of the merged PR.").
 4. The same two outcomes apply to a closed (not merged) PR, with the
    reason string naming "the closed PR" instead.
-6. A `gh` failure during PR lookup yields category "error".
-7. The dirty override applies last and unconditionally: a dirty worktree
+5. A `gh` failure during PR lookup yields category "error".
+6. The dirty override applies last and unconditionally: a dirty worktree
    is always categorized "dirty_skipped", regardless of what the ladder
    above produced -- including overriding "open" and a safe "merged".
 
