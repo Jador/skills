@@ -1,7 +1,7 @@
 ---
 name: worktree-cleanup
 description: Scan git worktrees for a repo, categorize each by safety-to-remove using GitHub PR status and local commit position, and remove the ones you approve
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Worktree Cleanup Skill

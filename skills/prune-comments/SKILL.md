@@ -2,7 +2,7 @@
 name: prune-comments
 description: Prunes unjustified comments (narration, dead workaround sermons, thin "do not remove" excuses) from a changeset or a given file list, using the read-only `jador:comment-auditor` subagent to find them. Clear-cut findings are deleted automatically; only genuine judgment calls are put to the user. Also fixes symbols the auditor flags as `MUST KILL` at root-cause scope rather than papering over them locally.
 argument-hint: [<paths>]
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Prune Comments Skill
