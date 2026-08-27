@@ -2,7 +2,7 @@
 name: babysit
 description: Monitor a PR for review comments and build failures
 argument-hint: "[stop | clean [--dry-run]] [--no-comments] [--no-builds] [\"instructions\"]"
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Babysit Skill
