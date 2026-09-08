@@ -1,6 +1,6 @@
 ---
 name: execute
-description: Execute a plan produced by /jador:plan. Reads plan files from ~/plans/, parses the task dependency graph, and orchestrates execution through waves of parallel sub-agents. Each agent implements a task, runs verification, self-heals on failure, and commits atomically. Use when the user wants to execute, run, or carry out a plan.
+description: Execute a plan produced by /jador:plan. Reads plan files from ~/plans/, parses the task dependency graph, and orchestrates execution through waves of parallel sub-agents. Each agent implements a task, runs verification, self-heals on failure, and commits atomically. Each task worker is paired with a live comment-auditor sub-agent that gates its commit on a comment audit. Use when the user wants to execute, run, or carry out a plan.
 argument-hint: "<plan-slug> [--step]"
 disable-model-invocation: true
 ---
@@ -13,6 +13,7 @@ You are a plan executor. Your job is to take a plan file (produced by `/jador:pl
 
 - **Always use the AskUserQuestion tool when presenting the user with a choice between discrete options.** This includes confirmations (yes/no), selecting from a list, and choosing between approaches.
 - **Never execute task work in the parent agent.** When a task needs to be retried (sub-agent failure, retasking, connectivity loss), always spawn a new sub-agent. Do not attempt the task inline. This preserves the parallelism and worktree isolation that the execute skill is designed around. Spawn that **retry** with `model: opus`, rather than the `model: sonnet` used for first attempts (see step 5b).
+- **Every retry gets a fresh auditor.** A retry spawns a fresh worker **and** a fresh auditor named `auditor-task-<N>-retry<k>` (see [assets/pairing-protocol.md](assets/pairing-protocol.md)), and the prior auditor for that task is stood down. The audit gates every real commit attempt, so each retry that reaches a commit gets its own audit — never reuse or resume a prior auditor across a retry.
 
 ## Process
 
@@ -78,23 +79,35 @@ For each wave, repeat the following loop until all tasks are complete or executi
 
 Collect the `Files` lists from all tasks in the current wave. Check for any intersection — if two or more tasks list the same file, those tasks have overlap.
 
-- **No overlap**: All agents run in the shared workspace (no isolation).
-- **Overlap detected (git repo only)**: Agents whose tasks have overlapping files run with `isolation: "worktree"`. Agents with no overlap run in the shared workspace.
+This detection, and any resulting `isolation: "worktree"`, applies to **workers only**. Auditors never receive isolation of any kind — giving an auditor its own worktree would land it in a different, unrelated tree than the worker it is meant to audit. An auditor needs no path at spawn time either: it learns nothing about scope until the worker sends it absolute paths at the pre-commit checkpoint (see [assets/pairing-protocol.md](assets/pairing-protocol.md)).
+
+- **No overlap**: All worker agents run in the shared workspace (no isolation).
+- **Overlap detected (git repo only)**: Worker agents whose tasks have overlapping files run with `isolation: "worktree"`. Workers with no overlap run in the shared workspace.
 - **Overlap detected (no git repo)**: Worktree isolation is unavailable. Run overlapping tasks **sequentially** instead of in parallel to avoid conflicts. Non-overlapping tasks can still run in parallel.
 
 #### b. Launch Sub-Agents in Parallel
 
-For each task in the wave, launch a sub-agent using the Agent tool. **Launch all agents in the wave in a single response** so they run in parallel.
+For each task in the wave, launch **two** agents: the worker and its paired auditor. **Launch every agent for the wave — every worker and every auditor — in a single response** so worker and auditor are concurrent from the start of the wave.
 
-Construct each agent's prompt by filling in the template from [assets/agent-prompt.md](assets/agent-prompt.md) with:
-- The task's number, title, description, files, and verification step
-- The plan's Assumptions and Notes sections
-- The idea document's Summary section
-- Whether the agent should use worktree isolation
+1. **The worker**, exactly as before. Construct its prompt by filling in the template from [assets/agent-prompt.md](assets/agent-prompt.md) with:
+   - The task's number, title, description, files, and verification step
+   - The plan's Assumptions and Notes sections
+   - The idea document's Summary section
+   - Whether the agent should use worktree isolation
+   - `{{AUDITOR_NAME}}`, computed as `auditor-task-<N>` for task `<N>`
 
-If a task requires worktree isolation, set `isolation: "worktree"` on the Agent tool call.
+   If a task requires worktree isolation, set `isolation: "worktree"` on the worker's Agent tool call.
 
-**Model selection.** Pin each first-attempt worker spawn to `model: sonnet`; spawn the **retry** of a failed/under-specified task (see the General Rules retry rule and step g) with `model: opus`. (First-attempt effort is carried as a soft constraint in the worker template, [assets/agent-prompt.md](assets/agent-prompt.md).)
+   **Model selection.** Pin each first-attempt worker spawn to `model: sonnet`; spawn the **retry** of a failed/under-specified task (see the General Rules retry rule and step g) with `model: opus`. (First-attempt effort is carried as a soft constraint in the worker template, [assets/agent-prompt.md](assets/agent-prompt.md).)
+
+2. **Its auditor**, named `auditor-task-<N>` (matching the name filled into the worker's prompt). Spawn it with `subagent_type: jador:comment-auditor`, `model: sonnet`, no isolation. Construct its prompt by filling in the template from [assets/auditor-prompt.md](assets/auditor-prompt.md) with the task's number, title, files, and its own `{{AUDITOR_NAME}}`.
+
+Auditors are support agents, not task agents — this holds throughout the rest of execution:
+- Their returns are not task results (step 5c does not collect from them).
+- They hold no worktree and contribute no branch (step 5d never merges or expects one from an auditor).
+- It is expected and harmless for an auditor to still be waiting on its worker when that worker finishes — stand it down per [assets/pairing-protocol.md](assets/pairing-protocol.md) rather than treating it as unfinished work.
+
+See [assets/pairing-protocol.md](assets/pairing-protocol.md) for the full spawn/addressing/checkpoint protocol this implements.
 
 #### c. Collect Results
 
@@ -155,6 +168,8 @@ If any task in the wave failed (agent reported `failed` after exhausting retries
    - **Fix manually**: Pause execution. The user fixes the issue, then re-runs `/jador:execute <slug>` to resume (resume support picks up from the failed task).
    - **Skip**: Mark the task as `skipped`, and also skip all tasks transitively blocked by it. Continue with remaining independent tasks.
    - **Abort**: Stop execution entirely. The plan file reflects current progress.
+
+If the chosen path re-executes the task (a retry), spawn a fresh worker **and** a fresh auditor together, named `auditor-task-<N>-retry<k>` per [assets/pairing-protocol.md](assets/pairing-protocol.md). Stand down the prior auditor for that task first — never reuse or resume it. This follows the General Rules retry rule and applies to every retry.
 
 #### h. Step Mode Gate
 
