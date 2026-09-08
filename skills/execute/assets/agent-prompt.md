@@ -71,7 +71,7 @@ Run this checkpoint before committing — in a git repo it gates the commit; in 
    Send nothing else — never a repo-wide diff, never a scope wider than your own `Files` list.
 3. **Await the reply.** Do not commit before it lands.
 4. **Write the received report to a temp file** via `mktemp`.
-5. **Apply findings.** Invoke `/jador:prune-comments --report <tmpfile> --non-interactive` via the Skill tool and let it apply the findings. Do not delete comments or fix `MUST KILL` symbols yourself — the policy for what to delete and how to fix lives in that skill.
+5. **Apply findings.** Invoke `/jador:prune-comments --report <tmpfile> --non-interactive` via the Skill tool and let it apply the findings. Do not delete comments or fix `MUST KILL` symbols yourself — the policy for what to delete and how to fix lives in that skill. Note its step 8 report's "`MUST KILL` fixes made" list (symbol, location, fix shape) — you need it for the commit trailer in step 5.
 6. **Re-run this task's own verification once**, since deletions and root-cause fixes landed after your original verification passed. If it now fails, revert the audit-induced edits only — never your task work — and record it in `Issues`.
 7. **Proceed to step 5** to commit.
 
@@ -86,6 +86,16 @@ After verification passes, commit all your changes with this exact message forma
 ```
 Execute plan: Task {{TASK_NUMBER}} - {{TASK_TITLE}}
 ```
+
+**If step 4.5 applied any `MUST KILL` fix**, append one trailer line per fix so it stays greppable and bisectable in `git log`, distinct from your own task work:
+
+```
+Execute plan: Task {{TASK_NUMBER}} - {{TASK_TITLE}}
+
+Comment-audit-fix: <symbol> at <file>:<line> — <fix shape> (<one-line reason>)
+```
+
+One trailer line per `MUST KILL` fix applied; omit the trailer entirely when step 4.5 made none. Comment-only deletions (no code behavior change) never get a trailer.
 
 Use `git add` for any new files, then `git commit`. Do NOT push.
 
