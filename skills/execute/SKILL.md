@@ -117,6 +117,10 @@ After all agents in the wave complete, collect their results. Each agent reports
 - **Verification output**: The result of running the verification step
 - **Issues**: Any problems encountered
 
+A worker's `Issues` field now carries a `Comment audit:` line and, when the checkpoint surfaced anything unresolved, an `### Audit open items (N)` block lifted verbatim from `prune-comments` (see [assets/agent-prompt.md](assets/agent-prompt.md) step 6). Capture both **verbatim** — do not summarize, paraphrase, or drop them — they are what step 5f and step 6 draw on to roll ambiguous auto-kept items and unfixed `MUST KILL` symbols up to the wave and plan summaries.
+
+**Stand down auditors.** Once this wave's worker results are collected, send every worker's paired auditor in the wave a one-line stand-down message per [assets/pairing-protocol.md](assets/pairing-protocol.md), for any auditor still waiting on a reply. Do this for the whole wave now, rather than leaving a lingering auditor to be caught later.
+
 #### d. Merge Worktree Branches (git repos only)
 
 > **Skip this step entirely if not in a git repository.** Worktree isolation is not used outside git repos, so there are no branches to merge.
@@ -156,8 +160,14 @@ Print a brief summary to the conversation:
 **Failed:**
 - Task K: <title> ✗ — <reason>
 
+**Comment audit open items:**
+- Task N: <item>
+- Task M: <item>
+
 **Next up:** Tasks X, Y, Z (group <label>)
 ```
+
+Build the **Comment audit open items** section from the `### Audit open items (N)` blocks captured in step 5c for every task in this wave: for each item line in a task's block, emit one `Task N: <item>` line, dropping the block's own leading `- ` and prefixing with that task's number instead. Print `_none_` in place of the list when every task in the wave reported an open-items count of 0 (or reported `Comment audit: unavailable`, which carries no items to roll up either way).
 
 #### g. Handle Failures
 
@@ -199,9 +209,15 @@ When all tasks are complete (or skipped/failed with no remaining executable task
 
 **Skipped/Failed tasks:** (if any)
 - Task K: <title> — <reason>
+
+**Comment audit open items:**
+- Task 1: <item>
+- Task 4: <item>
 ```
 
-3. **Synthesize the handoff (git repos only).** Invoke the handoff skill so whoever picks up the PR inherits full context — what shipped, deviations from the plan, decisions made, gotchas, and open threads. Use the Skill tool to run `/jador:handoff synthesize`; it writes the branch-keyed `.claude/handoffs/<branch>.md` in the worktree (uncommitted). Draw the decisions/deviations/gotchas from the sub-agent return summaries and the narrative of this run, not just from the diff — that unstated rationale is the part the next agent can't reconstruct on its own.
+Build the **Comment audit open items** section by aggregating the per-wave lists from every step 5f summary printed over the whole run — not just the final wave — so an item raised in an early wave (e.g. wave A) is still visible here after later waves (e.g. wave F) have completed. Keep the same `Task N: <item>` line shape. Print `_none_` in place of the list when no wave in the run reported any open items.
+
+3. **Synthesize the handoff (git repos only).** Invoke the handoff skill so whoever picks up the PR inherits full context — what shipped, deviations from the plan, decisions made, gotchas, and open threads. Use the Skill tool to run `/jador:handoff synthesize`; it writes the branch-keyed `.claude/handoffs/<branch>.md` in the worktree (uncommitted). Draw the decisions/deviations/gotchas from the sub-agent return summaries and the narrative of this run, not just from the diff — that unstated rationale is the part the next agent can't reconstruct on its own. Pass the aggregated **Comment audit open items** from step 2 in as open threads: an auto-kept ambiguous comment or an unfixed `MUST KILL` symbol is exactly the kind of unstated rationale the next agent can't reconstruct from the diff alone, so it belongs in the handoff, not just in this run's scrollback.
 
 ### 7. Offer a Design Critique (git repos only)
 
