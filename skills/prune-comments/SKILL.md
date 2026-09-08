@@ -11,7 +11,7 @@ You are the entry point that turns the comment auditor's read-only report into a
 
 ## General Rules
 
-- **Always use the AskUserQuestion tool when presenting the user with a choice between discrete options.**
+- **In interactive mode, always use the AskUserQuestion tool when presenting the user with a choice between discrete options.** Under `--non-interactive`, no `AskUserQuestion` call is ever made — see step 5.
 - **Clear-cut deletions are never gated behind a question.** Only genuine judgment calls go to the user.
 - **Never edit outside the resolved scope.** Findings on files not in scope are reported, not acted on.
 
@@ -53,6 +53,10 @@ Report the total count of clear-cut deletions applied (unlinked ones now; linked
 
 ### 5. Negotiate the Ambiguous Ones
 
+**Non-interactive mode:** every `Deletions` entry labeled `ambiguous` is auto-kept — never deleted, never negotiated, regardless of `patches` linkage (there is nothing to defer, since nothing is being deleted). For each one, record an open item carrying its `file`, line location, the verbatim comment text, and the auditor's `reason` — these feed the step 8 `### Audit open items` block. No `AskUserQuestion` call is made. No encoding is offered or applied — encoding a constraint durably is itself a judgment call that needs a live user. The `jador:handoff update` path described below is interactive-only: in non-interactive mode the caller that invoked this skill owns durable recording of open items itself, and the step 8 report is the handoff — do not invoke it. Skip the rest of this step and go to step 6.
+
+**Interactive mode** (`--non-interactive` not set): proceed as follows.
+
 Before negotiating, check the same `patches` linkage as step 4: if a `Deletions` entry labeled `ambiguous` is linked to a `MUST KILL` entry, defer it — it's handled once step 6 lands (or, if step 6's fix is itself design-blocked, this entry is now also blocked; report it open rather than negotiating a deletion whose defect is still live).
 
 For every unlinked `Deletions` entry labeled `ambiguous`, surface it to the user via AskUserQuestion — one question per entry (or batched sensibly if several are trivially related), each showing the verbatim comment text and its location.
@@ -68,6 +72,8 @@ On approval of an encoding: apply the encoding **first**, then delete the commen
 
 ### 6. Fix the MUST KILL Symbols
 
+This step runs identically in interactive and non-interactive mode — there is no mode branch here. That mode-independence is precisely why findings are applied *in this skill* rather than left for the worker prompt that invoked it: a worker prompt could tell the executor a symbol is broken, but only this step can fix it at root cause, verify the fix (step 7), and revert it on failure — all without a live user present.
+
 For each `MUST KILL` entry, apply its reported `fix shape` (rename, extract, type, test, lint, or fix) at the smallest scope that addresses the root cause the `reason` describes — not just at the comment site.
 
 If the entry carries a `patches` link, apply the fix **first**, then delete the linked comment (the `clear-cut` or `ambiguous`-but-deferred-from-step-5 entry) immediately after — this is the ordering finding 2 exists to enforce: never delete a suppression or a MUST KILL-patched comment before its underlying defect is fixed. Fold the linked comment into the deletion count from whichever step it originated in.
@@ -76,7 +82,9 @@ If a fix genuinely requires a design decision you can't make unilaterally (e.g. 
 
 ### 7. Verify Code Changes
 
-Comment-only edits (steps 4–5, unlinked) don't change runtime or type behavior, so they need no verification. But step 6's `MUST KILL` fixes do touch actual code — renames, extractions, type changes, new tests, lint fixes, or direct bug fixes — so if step 6 applied at least one fix, run the project's lint, typecheck, and test commands on the touched files (check for existing scripts — e.g. `package.json` scripts, a `Makefile`, or a CI config — before guessing a command). If step 6 made no fixes, skip this step entirely.
+This step, like step 6, runs identically regardless of invocation mode — what needs verification depends only on whether step 6 touched code, not on how step 5's findings got resolved.
+
+Comment-only edits (steps 4–5) don't change runtime or type behavior, so they need no verification of their own, in either mode — this includes step 4's clear-cut deletions and, in interactive mode, any ambiguous deletion or encoding step 5 applied. But step 6's `MUST KILL` fixes do touch actual code — renames, extractions, type changes, new tests, lint fixes, or direct bug fixes — so if step 6 applied at least one fix, run the project's lint, typecheck, and test commands on the touched files (check for existing scripts — e.g. `package.json` scripts, a `Makefile`, or a CI config — before guessing a command). If step 6 made no fixes, skip this step entirely.
 
 If verification fails, the fix that touched the failing area is suspect: revert that specific fix (and restore any comment it had authorized deleting) and report it as an open item rather than leaving the tree broken. Do not revert fixes unrelated to the failure.
 
@@ -88,10 +96,22 @@ Close with a report covering:
 - **Encodings offered vs. applied** — for each ambiguous constraint entry, whether an encoding was offered and whether the user approved it.
 - **`MUST KILL` fixes made** — symbol, location, and fix shape applied.
 - **Verification result** — whether step 7 ran, and its outcome (skipped because no code fix landed, passed, or which fix was reverted after a failure).
-- **Everything left open** — declined-encoding constraints recorded per step 5, design-blocked `MUST KILL` entries from step 6, and any deletion left in place because its linked fix is still open.
+- **Everything left open** — in interactive mode, declined-encoding constraints recorded per step 5; in non-interactive mode, every auto-kept `ambiguous` entry from step 5; in either mode, design-blocked `MUST KILL` entries from step 6, and any deletion left in place because its linked fix is still open.
 
 Never report on or touch `Skipped` entries — they survived the audit and are out of scope for this skill entirely.
+
+Always close the report with this exact trailing block, machine-consumable so a calling worker (e.g. a `/jador:execute` task worker) can lift it verbatim into its own `Issues` field:
+
+```
+### Audit open items (N)
+- <file>:<line> — auto-kept (ambiguous): "<verbatim comment>" — <reason>
+- <symbol> at <file>:<line> — MUST KILL unfixed (design-blocked): <reason>
+```
+
+`N` is the total line count that follows. The first line shape is for step 5's non-interactive auto-kept `ambiguous` entries; the second is for step 6's design-blocked `MUST KILL` entries, in either mode. Emit the header as `### Audit open items (0)` with no lines under it when there is nothing open — never omit the block — so the caller never has to distinguish "no open items" from "block missing".
 
 ## No Looping
 
 If a re-reviewed or rejected finding fails a second pass — the user declines the same negotiation twice, a fix attempt doesn't resolve a `MUST KILL` entry on retry, or a verification failure recurs after one re-attempt of the fix — report it as an open item rather than re-prompting or re-attempting indefinitely.
+
+In non-interactive mode there is no re-prompt and no second negotiation pass at all: since step 5 never negotiates in the first place, a finding that can't be applied cleanly on the first attempt (an unresolvable `MUST KILL` fix, a verification failure after one re-attempt) goes straight to an open item, same as above — there is simply no interactive retry loop to exhaust first.
