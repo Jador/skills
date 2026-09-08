@@ -8,14 +8,14 @@ Personal productivity skills for Claude Code.
 |-------|---------|-------------|
 | **Discuss** | `/jador:discuss` | Flesh out an idea through structured Q&A, producing a polished idea document in `~/ideas/` — with an optional `jador:critique` pass on the draft before writing |
 | **Plan** | `/jador:plan` | Break down an idea into a detailed execution plan with parallel task groups. Plans live in `~/plans/` |
-| **Execute** | `/jador:execute` | Run a plan using parallel sub-agents with worktree isolation and auto-retry |
+| **Execute** | `/jador:execute` | Run a plan using parallel sub-agents with worktree isolation and auto-retry — each task worker is paired with a live `jador:comment-auditor` that gates the commit on a comment audit |
 | **Babysit** | `/jador:babysit` | Monitor a PR for review comments and build failures, auto-fixing issues |
 | **Handoff** | `/jador:handoff` | Synthesize, read, or update an agent handoff doc — a "what happened" digest (decisions, deviations, gotchas, open threads) at `.claude/handoffs/<branch>.md`. Written by execute, read by babysit, kept honest by babysit's post-push `update` (additive deltas) |
 | **Critique** | `/jador:critique` | Adversarial design review of a plan, changeset, or bare idea via the read-only `jador:adversary` agent — soundness, maintainability, alternatives at architecture altitude (not nits/bugs). Writes `.claude/critiques/<branch>.md` (idea mode is advisory, writes nothing) |
 | **MQ** | `/jador:mq` | Monitor merge queue and auto-retry failed Buildkite jobs (checks every 2 min) |
 | **Backlog** | `/jador:backlog` | Surface idle work — notes without ideas, ideas without plans, plans without execution |
 | **Notepad** | `/jador:notepad` | Quick scratch pad for capturing, listing, and managing ideas |
-| **Prune Comments** | `/jador:prune-comments` | Hunts unjustified comments in a changeset or file list via the read-only `jador:comment-auditor` agent and deletes them, keeping only the fixed exception list — asks the user only on genuine judgment calls, and fixes `MUST KILL` symbols at root-cause scope |
+| **Prune Comments** | `/jador:prune-comments` | Hunts unjustified comments in a changeset or file list via the read-only `jador:comment-auditor` agent and deletes them, keeping only the fixed exception list — interactively, asks the user only on genuine judgment calls, and fixes `MUST KILL` symbols at root-cause scope; in `execute`'s non-interactive/`--report` mode, ambiguous findings are auto-kept and reported instead of negotiated |
 | **Skill Builder** | `/jador:skill-builder` | Scaffold new Claude Code skills through guided conversation |
 | **Worktree Cleanup** | `/jador:worktree-cleanup` | Scan git worktrees, categorize each by safety-to-remove via GitHub PR status and local commit position, and remove the ones you approve |
 
