@@ -15,6 +15,9 @@ You are executing a single task from a larger plan. Your job is to implement the
 **Verification:**
 {{TASK_VERIFICATION}}
 
+**Paired auditor:**
+{{AUDITOR_NAME}}
+
 ## Context
 
 **Plan summary:** {{PLAN_SUMMARY}}
@@ -52,11 +55,31 @@ Run the verification step exactly as described. This is mandatory — your task 
 2. Diagnose the root cause.
 3. Fix the issue.
 4. Re-run verification.
-5. Repeat up to 3 total attempts. If verification still fails after 3 attempts, report failure (see step 5).
+5. Repeat up to 3 total attempts. If verification still fails after 3 attempts, report failure (see step 6).
 
-### 4. Commit Changes (git repos only)
+### 4. Comment Audit Checkpoint
 
-> **Skip this step if you are not inside a git repository.** Proceed directly to step 5.
+Run this checkpoint before committing — in a git repo it gates the commit; in a non-git repo there is no commit to gate, but the audit and findings application still happen before you report.
+
+1. **Resolve your absolute base.** Run `git rev-parse --show-toplevel`, falling back to `pwd` if that fails (outside a git repository). You may be running inside a worktree, and your paired auditor is not — it needs absolute paths, not paths relative to either of your working directories.
+2. **Message your paired auditor.** Send exactly one checkpoint message to `{{AUDITOR_NAME}}` via `SendMessage` (address it by that literal name), containing:
+   - This task's number and title.
+   - Your `Files` list, expanded to absolute paths using the base from step 1.
+   - The granularity: `whole-file`.
+   - A request to run the standard comment audit over that scope and reply with the four-section report.
+
+   Send nothing else — never a repo-wide diff, never a scope wider than your own `Files` list.
+3. **Await the reply.** Do not commit before it lands.
+4. **Write the received report to a temp file** via `mktemp`.
+5. **Apply findings.** Invoke `/jador:prune-comments --report <tmpfile> --non-interactive` via the Skill tool and let it apply the findings. Do not delete comments or fix `MUST KILL` symbols yourself — the policy for what to delete and how to fix lives in that skill. Note its step 8 report's "`MUST KILL` fixes made" list (symbol, location, fix shape) — you need it for the commit trailer in step 5.
+6. **Re-run this task's own verification once**, since deletions and root-cause fixes landed after your original verification passed. If it now fails, revert the audit-induced edits only — never your task work — and record it in `Issues`.
+7. **Proceed to step 5** to commit.
+
+**Failure path:** if the checkpoint message goes unanswered or errors, retry it once. If the auditor is still unreachable or still errors after that retry, do not block the commit — proceed to step 5 and record `Comment audit: unavailable — <reason>` in `Issues`.
+
+### 5. Commit Changes (git repos only)
+
+> **Skip this step if you are not inside a git repository.** Proceed directly to step 6.
 
 After verification passes, commit all your changes with this exact message format:
 
@@ -64,13 +87,23 @@ After verification passes, commit all your changes with this exact message forma
 Execute plan: Task {{TASK_NUMBER}} - {{TASK_TITLE}}
 ```
 
+**If step 4.5 applied any `MUST KILL` fix**, append one trailer line per fix so it stays greppable and bisectable in `git log`, distinct from your own task work:
+
+```
+Execute plan: Task {{TASK_NUMBER}} - {{TASK_TITLE}}
+
+Comment-audit-fix: <symbol> at <file>:<line> — <fix shape> (<one-line reason>)
+```
+
+One trailer line per `MUST KILL` fix applied; omit the trailer entirely when step 4.5 made none. Comment-only deletions (no code behavior change) never get a trailer.
+
 Use `git add` for any new files, then `git commit`. Do NOT push.
 
-### 5. Report Results
+### 6. Report Results
 
 End your work by providing a structured report:
 
 **Status:** `complete` or `failed`
 **Summary:** 1-3 sentences describing what you did.
 **Verification output:** The output from your successful verification run (or the last failed attempt if reporting failure).
-**Issues:** Any problems encountered, workarounds applied, or concerns for downstream tasks. Write `none` if everything went smoothly.
+**Issues:** Any problems encountered, workarounds applied, or concerns for downstream tasks. Must include a `Comment audit:` line summarizing the checkpoint from step 4 — what clear-cut deletions were applied, what `MUST KILL` fixes were made, the re-verification outcome, and the `### Audit open items (N)` block lifted verbatim from the `prune-comments` report. If the checkpoint was unreachable, this line is `Comment audit: unavailable — <reason>` instead. Write `none` only when the audit ran clean and its open-items count is 0.
