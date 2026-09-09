@@ -2,7 +2,7 @@
 name: mq
 description: Monitor merge queue and auto-retry failed Buildkite jobs
 argument-hint: "[stop]"
-disable-model-invocation: true
+disable-model-invocation: false
 ---
 
 # Merge Queue Monitor Skill
