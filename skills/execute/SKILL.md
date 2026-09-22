@@ -13,7 +13,7 @@ You are a plan executor. Your job is to take a plan file (produced by `/jador:pl
 
 - **Always use the AskUserQuestion tool when presenting the user with a choice between discrete options.** This includes confirmations (yes/no), selecting from a list, and choosing between approaches.
 - **Never execute task work in the parent agent.** When a task needs to be retried (sub-agent failure, retasking, connectivity loss), always spawn a new sub-agent. Do not attempt the task inline. This preserves the parallelism and worktree isolation that the execute skill is designed around. Spawn that **retry** with `model: opus`, rather than the `model: sonnet` used for first attempts (see step 5b).
-- **Every retry gets a fresh auditor.** A retry spawns a fresh worker **and** a fresh auditor named `auditor-task-<N>-retry<k>` (see [assets/pairing-protocol.md](assets/pairing-protocol.md)), and the prior auditor for that task is stood down. The audit gates every real commit attempt, so each retry that reaches a commit gets its own audit — never reuse or resume a prior auditor across a retry.
+- **Every retry gets a fresh auditor.** A retry spawns a fresh worker named `worker-task-<N>-retry<k>` **and** a fresh auditor named `auditor-task-<N>-retry<k>` (see [assets/pairing-protocol.md](assets/pairing-protocol.md)), sharing the same `<k>`; the retry auditor's `{{WORKER_NAME}}` is the retry worker's name. The prior auditor for that task is stood down. The audit gates every real commit attempt, so each retry that reaches a commit gets its own audit — never reuse or resume a prior auditor across a retry.
 
 ## Process
 
@@ -89,7 +89,7 @@ This detection, and any resulting `isolation: "worktree"`, applies to **workers 
 
 For each task in the wave, launch **two** agents: the worker and its paired auditor. **Launch every agent for the wave — every worker and every auditor — in a single response** so worker and auditor are concurrent from the start of the wave.
 
-1. **The worker**, exactly as before. Construct its prompt by filling in the template from [assets/agent-prompt.md](assets/agent-prompt.md) with:
+1. **The worker**, named `worker-task-<N>` for task `<N>` via the Agent tool's `name` parameter. Construct its prompt by filling in the template from [assets/agent-prompt.md](assets/agent-prompt.md) with:
    - The task's number, title, description, files, and verification step
    - The plan's Assumptions and Notes sections
    - The idea document's Summary section
@@ -100,12 +100,12 @@ For each task in the wave, launch **two** agents: the worker and its paired audi
 
    **Model selection.** Pin each first-attempt worker spawn to `model: sonnet`; spawn the **retry** of a failed/under-specified task (see the General Rules retry rule and step g) with `model: opus`. (First-attempt effort is carried as a soft constraint in the worker template, [assets/agent-prompt.md](assets/agent-prompt.md).)
 
-2. **Its auditor**, named `auditor-task-<N>` (matching the name filled into the worker's prompt). Spawn it with `subagent_type: jador:comment-auditor`, `model: sonnet`, no isolation. Construct its prompt by filling in the template from [assets/auditor-prompt.md](assets/auditor-prompt.md) with the task's number, title, files, and its own `{{AUDITOR_NAME}}`.
+2. **Its auditor**, named `auditor-task-<N>` (matching the name filled into the worker's prompt). Spawn it with `subagent_type: jador:comment-auditor`, `model: sonnet`, no isolation. Construct its prompt by filling in the template from [assets/auditor-prompt.md](assets/auditor-prompt.md) with the task's number, title, files, its own `{{AUDITOR_NAME}}`, and `{{WORKER_NAME}}`, computed as `worker-task-<N>` (the name filled into the worker's prompt above).
 
 Auditors are support agents, not task agents — this holds throughout the rest of execution:
 - Their returns are not task results (step 5c does not collect from them).
 - They hold no worktree and contribute no branch (step 5d never merges or expects one from an auditor).
-- It is expected and harmless for an auditor to still be waiting on its worker when that worker finishes — stand it down per [assets/pairing-protocol.md](assets/pairing-protocol.md) rather than treating it as unfinished work.
+- Between messages, an auditor is idle with its turn ended — that is expected, not unfinished work. Once its worker finishes, stand the auditor down per [assets/pairing-protocol.md](assets/pairing-protocol.md) rather than treating it as unfinished work.
 
 See [assets/pairing-protocol.md](assets/pairing-protocol.md) for the full spawn/addressing/checkpoint protocol this implements.
 
@@ -119,7 +119,9 @@ After all agents in the wave complete, collect their results. Each agent reports
 
 A worker's `Issues` field now carries a `Comment audit:` line and, when the checkpoint surfaced anything unresolved, an `### Audit open items (N)` block lifted verbatim from `prune-comments` (see [assets/agent-prompt.md](assets/agent-prompt.md) step 6). Capture both **verbatim** — do not summarize, paraphrase, or drop them — they are what step 5f and step 6 draw on to roll ambiguous auto-kept items and unfixed `MUST KILL` symbols up to the wave and plan summaries.
 
-**Stand down auditors.** Once this wave's worker results are collected, send every worker's paired auditor in the wave a one-line stand-down message per [assets/pairing-protocol.md](assets/pairing-protocol.md), for any auditor still waiting on a reply. Do this for the whole wave now, rather than leaving a lingering auditor to be caught later.
+**A waiting worker is not a result.** A worker's result is only the turn that ends with the step-6 structured report (`**Status:**` …). A worker whose turn ends with the exact final line `Awaiting audit from auditor-task-<N>.` (its paired auditor's literal name, so `auditor-task-<N>-retry<k>` for a retry) has sent its checkpoint and is waiting for its audit, not finished. Identify a waiting worker by that line, not only by the absence of a `**Status:**` block. Do not collect that turn, do not re-task the worker, and do not treat it as failed. It resumes when the auditor's report arrives.
+
+**Stand down auditors.** Once this wave's worker results are collected, send a one-line stand-down message to every paired auditor in the wave per [assets/pairing-protocol.md](assets/pairing-protocol.md). The auditor is idle between turns; the stand-down message resumes it, and it ends its turn with no output. Do this for the whole wave now, rather than leaving a lingering auditor to be caught later.
 
 #### d. Merge Worktree Branches (git repos only)
 
@@ -179,7 +181,7 @@ If any task in the wave failed (agent reported `failed` after exhausting retries
    - **Skip**: Mark the task as `skipped`, and also skip all tasks transitively blocked by it. Continue with remaining independent tasks.
    - **Abort**: Stop execution entirely. The plan file reflects current progress.
 
-If the chosen path re-executes the task (a retry), spawn a fresh worker **and** a fresh auditor together, named `auditor-task-<N>-retry<k>` per [assets/pairing-protocol.md](assets/pairing-protocol.md). Stand down the prior auditor for that task first — never reuse or resume it. This follows the General Rules retry rule and applies to every retry.
+If the chosen path re-executes the task (a retry), spawn a fresh worker named `worker-task-<N>-retry<k>` **and** a fresh auditor named `auditor-task-<N>-retry<k>` together, sharing the same `<k>`, per [assets/pairing-protocol.md](assets/pairing-protocol.md). Stand down the prior auditor for that task first — never reuse or resume it. This follows the General Rules retry rule and applies to every retry.
 
 #### h. Step Mode Gate
 
