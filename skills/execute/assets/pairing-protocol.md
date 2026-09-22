@@ -24,7 +24,7 @@ Polling, `sleep`, and re-reading files are forbidden as ways to wait for a messa
 
 There is no spawn-time ack. On being spawned, the auditor does not acknowledge the task, audit anything, or speculate about scope — it ends its turn immediately and waits to be resumed.
 
-After sending its checkpoint, the worker ends its turn with the exact final line `Awaiting audit from {{AUDITOR_NAME}}.` (for example `Awaiting audit from auditor-task-<N>.`). A worker whose turn ends with that line is waiting for its audit, not done — the orchestrator collects only the worker's later step-6 `**Status:**` report, not this line.
+After sending its checkpoint, the worker closes its checkpoint turn with the line `Awaiting audit from {{AUDITOR_NAME}}.` (for example `Awaiting audit from auditor-task-<N>.`) — unless the auditor's report has already arrived before the worker gets there, in which case the worker skips this line entirely and continues straight into applying the report. The orchestrator identifies a waiting worker by a turn that contains this line and has no `**Status:**` block, not by the line being the literal last thing the turn printed — trailing text can follow it. The orchestrator collects only the worker's later step-6 `**Status:**` report, not this line.
 
 ## Path Resolution
 
@@ -52,6 +52,8 @@ Include nothing else. In particular, never send a repo-wide diff and never widen
 ## Reply Contract
 
 Treat the auditor's reply as the unmodified four-section `jador:comment-auditor` report: `Files touched`, `Deletions`, `MUST KILL`, `Skipped`. The auditor delivers this report to `{{WORKER_NAME}}` with `SendMessage`, not as plain output — plain output goes to the orchestrator, not the worker. Do not have the worker reinterpret, summarize, or restate this report — pass it through as-is to whatever applies it (`prune-comments` in report-input mode).
+
+The auditor sends exactly one report per checkpoint. Once a worker has reported its step-6 `**Status:**` result, it is done: any later message it receives — including a duplicate report — gets no action, and it ends its turn immediately rather than re-applying findings or committing again.
 
 ## Stand-Down
 

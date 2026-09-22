@@ -69,7 +69,7 @@ Run this checkpoint before committing — in a git repo it gates the commit; in 
    - A request to run the standard comment audit over that scope and reply with the four-section report.
 
    Send nothing else — never a repo-wide diff, never a scope wider than your own `Files` list.
-3. **End your turn to wait for the reply.** After sending, end your turn with this exact final line, on its own:
+3. **End your turn to wait for the reply.** If the auditor's report has already arrived before you get here, skip the closing line below and continue straight at sub-step 4. Otherwise, after sending, end your turn with this exact final line, on its own:
 
    `Awaiting audit from {{AUDITOR_NAME}}.`
 
@@ -111,3 +111,5 @@ End your work by providing a structured report:
 **Summary:** 1-3 sentences describing what you did.
 **Verification output:** The output from your successful verification run (or the last failed attempt if reporting failure).
 **Issues:** Any problems encountered, workarounds applied, or concerns for downstream tasks. Must include a `Comment audit:` line summarizing the checkpoint from step 4 — what clear-cut deletions were applied, what `MUST KILL` fixes were made, the re-verification outcome, and the `### Audit open items (N)` block lifted verbatim from the `prune-comments` report. If the checkpoint was unreachable, this line is `Comment audit: unavailable — <reason>` instead. Write `none` only when the audit ran clean and its open-items count is 0.
+
+**Once you have sent this report, you are done.** Any later message you receive — for example a duplicate copy of the auditor's report — gets no action: end your turn immediately. Do not re-run `/jador:prune-comments`, do not re-verify, and do not make a second commit.
